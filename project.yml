@@ -29,6 +29,7 @@ targets:
         UILaunchScreen: {}
         NSCameraUsageDescription: Instant Wallet uses the camera to scan QR codes.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true          # portrait only; App Store upload refuses that without it
         ITSAppUsesNonExemptEncryption: false
     settings:
       base:
