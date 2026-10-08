@@ -7,7 +7,7 @@
 // only through its passkey.
 import SwiftUI
 
-let SITE = URL(string: "https://instant-wallet-b2jn.vercel.app/")!
+let SITE = URL(string: "https://instantwallet.io/")!
 
 final class Nav: ObservableObject {
     @Published var url = SITE

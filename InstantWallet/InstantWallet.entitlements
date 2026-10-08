@@ -4,8 +4,8 @@
 <dict>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
-		<string>webcredentials:instant-wallet-b2jn.vercel.app</string>
-		<string>applinks:instant-wallet-b2jn.vercel.app</string>
+		<string>webcredentials:instantwallet.io</string>
+		<string>applinks:instantwallet.io</string>
 	</array>
 </dict>
 </plist>
