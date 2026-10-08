@@ -17,13 +17,7 @@ struct WebView: UIViewRepresentable {
         cfg.websiteDataStore = .default()        // persistent: localStorage, the wallet
         cfg.applicationNameForUserAgent = "instant-wallet-app"
 
-        // DEBUG: show the raw WebAuthn error
-        cfg.userContentController.addUserScript(WKUserScript(source: """
-          (function(){ const c = navigator.credentials; for (const k of ['create','get']) { const f = c[k].bind(c);
-            c[k] = (o) => f(o).catch(e => { alert('DEBUG ' + k + ': ' + e.name + ' / ' + e.message + ' / host=' + location.hostname); throw e; }); } })();
-          """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let wv = WKWebView(frame: .zero, configuration: cfg)
-        wv.isInspectable = true
         wv.uiDelegate = context.coordinator
         wv.navigationDelegate = context.coordinator
         wv.isOpaque = false

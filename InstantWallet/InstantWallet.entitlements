@@ -6,6 +6,8 @@
 	<array>
 		<string>webcredentials:instantwallet.io</string>
 		<string>applinks:instantwallet.io</string>
+		<string>webcredentials:instantwallet.io?mode=developer</string>
+		<string>applinks:instantwallet.io?mode=developer</string>
 	</array>
 </dict>
 </plist>
