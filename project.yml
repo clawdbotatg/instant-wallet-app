@@ -26,6 +26,8 @@ targets:
       properties:
         CFBundleDisplayName: Instant
         CFBundleName: InstantWallet
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         NSCameraUsageDescription: Instant Wallet uses the camera to scan QR codes.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
