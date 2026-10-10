@@ -3,9 +3,14 @@
 //      doesn't re-ask every launch (iOS asks once, for the app);
 //   2. links — window.open / target=_blank and links off the site go to Safari;
 //   3. a killed content process reloads the page instead of a white screen;
-//   4. load state drives the Splash: ready on finish, offline on a failed load.
+//   4. load state drives the Splash: waiting when the page is up, ready when the
+//      site posts `ready` (balance in) or after WAIT_MAX, offline on a failed load.
 import SwiftUI
 import WebKit
+
+// Only a ceiling for a balance that never comes (API down, bad signal): the
+// wallet stays reachable. Never a minimum — ready shows the wallet at once.
+let WAIT_MAX: TimeInterval = 5
 
 struct WebView: UIViewRepresentable {
     @ObservedObject var nav: Nav
@@ -17,6 +22,7 @@ struct WebView: UIViewRepresentable {
         cfg.allowsInlineMediaPlayback = true     // the scanner's <video> plays in the page, not full screen
         cfg.websiteDataStore = .default()        // persistent: localStorage, the wallet
         cfg.applicationNameForUserAgent = "instant-wallet-app"
+        cfg.userContentController.add(context.coordinator, name: "ready")   // the site: balance is on screen
 
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.uiDelegate = context.coordinator
@@ -41,7 +47,7 @@ struct WebView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
         var loaded: URL?
         var retries = 0
         let nav: Nav
@@ -76,8 +82,19 @@ struct WebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
+        func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+            if mine(message.frameInfo.securityOrigin.host), nav.phase == .loading || nav.phase == .waiting { nav.phase = .ready }
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            nav.phase = .ready
+            guard nav.phase == .loading else { return }
+            // only the wallet (/) has a balance to wait for; a claim link or /recover shows as soon as it's up
+            if webView.url?.path != "/" { nav.phase = .ready; return }
+            nav.phase = .waiting
+            let tries = retries
+            DispatchQueue.main.asyncAfter(deadline: .now() + WAIT_MAX) { [nav] in
+                if tries == self.retries, nav.phase == .waiting { nav.phase = .ready }
+            }
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

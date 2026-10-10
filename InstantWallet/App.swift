@@ -10,7 +10,8 @@ import SwiftUI
 let SITE = URL(string: "https://instantwallet.io/")!
 
 final class Nav: ObservableObject {
-    enum Phase { case loading, ready, offline }
+    // loading: the page isn't up · waiting: it is, the balance isn't · ready: the wallet shows
+    enum Phase { case loading, waiting, ready, offline }
     @Published var url = SITE
     @Published var phase = Phase.loading
     @Published var retries = 0               // bumped by Try again; WebView reloads on change
@@ -27,7 +28,7 @@ struct InstantWalletApp: App {
                     .ignoresSafeArea()           // viewport-fit=cover: the page owns the notch + home bar
                 if nav.phase != .ready { Splash(nav: nav).transition(.opacity) }
             }
-                .animation(.easeOut(duration: 0.25), value: nav.phase)
+                .animation(.easeOut(duration: 0.2), value: nav.phase)
                 .background(Color("Background"))
                 .preferredColorScheme(.light)
                 // a site link (claim card, camera QR) opens here instead of Safari
@@ -39,32 +40,31 @@ struct InstantWalletApp: App {
     }
 }
 
-// The logo while the site loads; picks up exactly where the launch screen
-// (UILaunchScreen: Mark on Background) leaves off. Spinner only if it's slow;
-// no connection → Try again instead of a blank screen.
+// The logo until the wallet has its balance, so the page never shows "…".
+// Faded and breathing while the page loads (the launch screen is the same faded
+// logo), solid and pulsing while the balance loads. No minimum time: it goes the
+// moment the site says ready. No connection → Try again instead of a blank screen.
 struct Splash: View {
     @ObservedObject var nav: Nav
-    @State private var slow = false
 
     var body: some View {
         ZStack {
             Color("Background")
-            Image("Mark")
-            VStack(spacing: 14) {
-                if nav.phase == .offline {
+            TimelineView(.animation(paused: nav.phase == .offline)) { t in
+                let wave = (1 - cos(t.date.timeIntervalSinceReferenceDate * .pi)) / 2   // 0…1, every 2 s
+                Image("Mark")
+                    .opacity(nav.phase == .loading ? 0.3 + 0.3 * wave : 1)
+                    .scaleEffect(nav.phase == .waiting ? 1 + 0.05 * wave : 1)
+            }
+            if nav.phase == .offline {
+                VStack(spacing: 14) {
                     Text("No connection").font(.headline).foregroundStyle(.black)
                     Button("Try again") { nav.phase = .loading; nav.retries += 1 }
                         .buttonStyle(.borderedProminent).tint(.black)
-                } else if slow {
-                    ProgressView().controlSize(.large).tint(.gray)
                 }
+                    .offset(y: 150)              // under the logo, so the logo never moves
             }
-                .offset(y: 150)                  // under the logo, so the logo never moves
         }
             .ignoresSafeArea()
-            .task {
-                try? await Task.sleep(for: .milliseconds(500))
-                withAnimation { slow = true }
-            }
     }
 }

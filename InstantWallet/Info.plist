@@ -29,7 +29,7 @@
 		<key>UIColorName</key>
 		<string>Background</string>
 		<key>UIImageName</key>
-		<string>Mark</string>
+		<string>MarkFaded</string>
 	</dict>
 	<key>UIRequiresFullScreen</key>
 	<true/>

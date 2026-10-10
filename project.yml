@@ -14,7 +14,7 @@ settings:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "4"
+    CURRENT_PROJECT_VERSION: "5"
 targets:
   InstantWallet:
     type: application
@@ -28,7 +28,7 @@ targets:
         CFBundleName: InstantWallet
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        UILaunchScreen: { UIImageName: Mark, UIColorName: Background }   # same logo + spot as Splash
+        UILaunchScreen: { UIImageName: MarkFaded, UIColorName: Background }   # the logo at 30%, where Splash starts
         NSCameraUsageDescription: Instant Wallet uses the camera to scan QR codes.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresFullScreen: true          # portrait only; App Store upload refuses that without it
