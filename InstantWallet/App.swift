@@ -10,7 +10,10 @@ import SwiftUI
 let SITE = URL(string: "https://instantwallet.io/")!
 
 final class Nav: ObservableObject {
+    enum Phase { case loading, ready, offline }
     @Published var url = SITE
+    @Published var phase = Phase.loading
+    @Published var retries = 0               // bumped by Try again; WebView reloads on change
 }
 
 @main
@@ -19,9 +22,13 @@ struct InstantWalletApp: App {
 
     var body: some Scene {
         WindowGroup {
-            WebView(nav: nav)
-                .ignoresSafeArea()               // viewport-fit=cover: the page owns the notch + home bar
-                .background(Color(red: 244 / 255, green: 244 / 255, blue: 241 / 255))
+            ZStack {
+                WebView(nav: nav)
+                    .ignoresSafeArea()           // viewport-fit=cover: the page owns the notch + home bar
+                if nav.phase != .ready { Splash(nav: nav).transition(.opacity) }
+            }
+                .animation(.easeOut(duration: 0.25), value: nav.phase)
+                .background(Color("Background"))
                 .preferredColorScheme(.light)
                 // a site link (claim card, camera QR) opens here instead of Safari
                 .onOpenURL { u in if u.host == SITE.host { nav.url = u } }
@@ -29,5 +36,35 @@ struct InstantWalletApp: App {
                     if let u = a.webpageURL, u.host == SITE.host { nav.url = u }
                 }
         }
+    }
+}
+
+// The logo while the site loads; picks up exactly where the launch screen
+// (UILaunchScreen: Mark on Background) leaves off. Spinner only if it's slow;
+// no connection → Try again instead of a blank screen.
+struct Splash: View {
+    @ObservedObject var nav: Nav
+    @State private var slow = false
+
+    var body: some View {
+        ZStack {
+            Color("Background")
+            Image("Mark")
+            VStack(spacing: 14) {
+                if nav.phase == .offline {
+                    Text("No connection").font(.headline).foregroundStyle(.black)
+                    Button("Try again") { nav.phase = .loading; nav.retries += 1 }
+                        .buttonStyle(.borderedProminent).tint(.black)
+                } else if slow {
+                    ProgressView().controlSize(.large).tint(.gray)
+                }
+            }
+                .offset(y: 150)                  // under the logo, so the logo never moves
+        }
+            .ignoresSafeArea()
+            .task {
+                try? await Task.sleep(for: .milliseconds(500))
+                withAnimation { slow = true }
+            }
     }
 }

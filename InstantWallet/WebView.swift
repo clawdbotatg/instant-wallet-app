@@ -2,14 +2,15 @@
 //   1. camera — the QR scanner's getUserMedia is granted for the site, so WebKit
 //      doesn't re-ask every launch (iOS asks once, for the app);
 //   2. links — window.open / target=_blank and links off the site go to Safari;
-//   3. a killed content process reloads the page instead of a white screen.
+//   3. a killed content process reloads the page instead of a white screen;
+//   4. load state drives the Splash: ready on finish, offline on a failed load.
 import SwiftUI
 import WebKit
 
 struct WebView: UIViewRepresentable {
     @ObservedObject var nav: Nav
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(nav: nav) }
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -31,7 +32,10 @@ struct WebView: UIViewRepresentable {
     }
 
     func updateUIView(_ wv: WKWebView, context: Context) {
-        if nav.url != context.coordinator.loaded {
+        if nav.retries != context.coordinator.retries {
+            context.coordinator.retries = nav.retries
+            wv.load(URLRequest(url: context.coordinator.loaded ?? SITE))
+        } else if nav.url != context.coordinator.loaded {
             context.coordinator.loaded = nav.url
             wv.load(URLRequest(url: nav.url))
         }
@@ -39,6 +43,9 @@ struct WebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         var loaded: URL?
+        var retries = 0
+        let nav: Nav
+        init(nav: Nav) { self.nav = nav }
 
         private func mine(_ host: String?) -> Bool { host?.lowercased() == SITE.host }
 
@@ -67,6 +74,26 @@ struct WebView: UIViewRepresentable {
                 }
             }
             decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            nav.phase = .ready
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            failed(error)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            failed(error)
+        }
+
+        // a cancelled load (a newer one replaced it, or a link went to the system) isn't offline
+        private func failed(_ error: Error) {
+            let e = error as NSError
+            if e.domain == NSURLErrorDomain && e.code == NSURLErrorCancelled { return }
+            if e.domain == "WebKitErrorDomain" && e.code == 102 { return }   // frame load interrupted
+            nav.phase = .offline
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

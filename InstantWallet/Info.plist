@@ -25,7 +25,12 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Instant Wallet uses the camera to scan QR codes.</string>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>Background</string>
+		<key>UIImageName</key>
+		<string>Mark</string>
+	</dict>
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UISupportedInterfaceOrientations</key>
