@@ -48,7 +48,7 @@ final class DriveIO: @unchecked Sendable {
     func check() async throws -> URL { try await run { try self.checkNow() } }
     func readOnly() async throws -> Bool { try await run { try self.readOnlyNow() } }
     func read(_ name: String) async throws -> String? { try await run { try self.readNow(name) } }
-    func send(_ line: String) async throws -> String { try await run(6) { try self.sendNow(line) } }
+    func send(_ line: String) async throws -> String { try await run(10) { try self.sendNow(line) } }
     func resolve() async throws -> URL { try await run { try self.resolveNow() } }
 
     private func resolveNow() throws -> URL {
@@ -103,34 +103,51 @@ final class DriveIO: @unchecked Sendable {
 
     /// Write a line as a new REQ-<n>.TXT (the wedgie reads each file once, 0.7 s after the last write). Every old
     /// REQ file goes first (and iOS's ._REQ twins, and a half-written one from a failed send): the wedgie keeps
-    /// what's written in RAM, 12 sectors at most, and frees a deleted file's 2 s later. Safe because the page sends
-    /// one at a time, only after the last one's answer (so the wedgie has read it). A big tx's pieces filled the
-    /// RAM when only files over 3 s old went (10-10).
+    /// what's written in RAM, 12 sectors at most, and frees a deleted file's only once the drive's FAT says it's
+    /// free. Safe because the page sends one at a time, only after the last one's answer (the wedgie has read it).
+    /// iOS kept the deletes in its cache, so the FAT never said free and a big tx's third piece always failed
+    /// (10-10): flush the volume after deleting and after writing.
     private func sendNow(_ line: String) throws -> String {
         try with { root in
             let fm = FileManager.default
-            for u in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+            var gone = 0
+            for u in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
                 let n = u.lastPathComponent.uppercased()
                 guard n.hasPrefix("REQ-") || n.hasPrefix("._REQ-") else { continue }
-                coordinated(u, .forDeleting) { try fm.removeItem(at: $0) }
+                if (try? fm.removeItem(at: u)) != nil { gone += 1 }
             }
+            if gone > 0 { Self.flush(root) }
             let d = UserDefaults.standard
             let n = d.integer(forKey: "wedgieReqN") % 9999 + 1
             d.set(n, forKey: "wedgieReqN")
             let name = "REQ-\(n).TXT"
-            let body = Data((line + "\n").utf8)
-            var werr: Error?
-            coordinated(root.appendingPathComponent(name), .forReplacing) { u in
-                do { try body.write(to: u) } catch { werr = error }
+            let file = root.appendingPathComponent(name)
+            guard fm.createFile(atPath: file.path, contents: nil) else { throw DriveError.full }
+            let h = try FileHandle(forWritingTo: file)
+            do {
+                try h.write(contentsOf: Data((line + "\n").utf8))
+                try h.synchronize()
+                try h.close()
+            } catch {
+                try? h.close()
+                try? fm.removeItem(at: file)            // a half-written one would hold the wedgie's RAM
+                Self.flush(root)
+                throw error
             }
-            if let werr { throw werr }
+            Self.flush(root)
             return name
         }
     }
 
-    private func coordinated(_ url: URL, _ opts: NSFileCoordinator.WritingOptions, _ body: (URL) throws -> Void) {
-        var err: NSError?
-        NSFileCoordinator().coordinate(writingItemAt: url, options: opts, error: &err) { u in try? body(u) }
+    /// Push what iOS still holds for the drive (deletes, folder and FAT changes) out to the wedgie now.
+    private static func flush(_ root: URL) {
+        let fd = open(root.path, O_RDONLY)
+        if fd >= 0 {
+            fsync(fd)
+            _ = fcntl(fd, F_FULLFSYNC)
+            close(fd)
+        }
+        sync()
     }
 }
 
@@ -142,13 +159,14 @@ private final class Once: @unchecked Sendable {
 }
 
 enum DriveError: LocalizedError {
-    case notPicked, noAccess, away, notWedgie
+    case notPicked, noAccess, away, notWedgie, full
     var errorDescription: String? {
         switch self {
         case .notPicked: return "pick the WEDGIE drive first"
         case .noAccess: return "iOS said no to the drive: pick it again"
         case .away: return "plug in your wedgie"
         case .notWedgie: return "that folder isn't the WEDGIE drive"
+        case .full: return "the wedgie took no more (its drive is full for now)"
         }
     }
 }
