@@ -7,10 +7,11 @@
 //      site posts `ready` (balance in) or after WAIT_MAX, offline on a failed load;
 //   5. the wedgie: `window.wedgieDrive` (only on the site) reaches a wedgie through its
 //      WEDGIE drive (Drive.swift). The site's web/lib/safe/wedgie.ts uses it:
-//        status()      -> {state: "unpicked"|"away"|"readonly"|"here", name, panel}
+//        status()      -> {state: "unpicked"|"away"|"readonly"|"here", name, panel, connecting, press}
+//                         (connecting: knocking or remounting; press: its firmware asks for a green press first)
 //        send(line)    -> the REQ file name it wrote (one JSON request, with its id)
 //        read(name)    -> the file's text, or null
-//        panel(mode)   -> opens the wedgie panel; "connect": knock now, close once the phone is in
+//        panel(mode)   -> opens the wedgie panel; "connect": close it once the drive is writable
 import SwiftUI
 import WebKit
 
@@ -182,7 +183,8 @@ final class DriveBridge: NSObject, WKScriptMessageHandlerWithReply {
                 switch op {
                 case "status":
                     let state = drive.state == .here && drive.readOnly ? "readonly" : drive.state.rawValue
-                    replyHandler(["state": state, "name": drive.name, "panel": drive.showPanel], nil)
+                    replyHandler(["state": state, "name": drive.name, "panel": drive.showPanel,
+                                  "connecting": drive.knocked != nil, "press": drive.asksFirst], nil)
                 case "send":
                     guard let arg else { return replyHandler(nil, "nothing to send") }
                     replyHandler(try await drive.send(arg), nil)

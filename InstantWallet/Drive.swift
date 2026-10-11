@@ -2,9 +2,9 @@
 // mounts USB drives, and every wedgie is one). Ported from wedgie-dev ios/WedgieDrive; the why and the
 // gotchas are in instant-wallet docs/WEDGIE-PHONE.md.
 //
-// Pick the drive's top folder once (a security-scoped bookmark keeps it). The drive is read-only until the
-// wedgie lets the phone in (firmware 0.3.37+): we "knock" by reading PHONE.TXT twice, the wedgie asks, a green
-// press makes it drop off USB for 2 s and come back writable until unplug.
+// Pick the drive's top folder once (a security-scoped bookmark keeps it). The drive is read-only until we
+// knock (firmware 0.3.41+: read KNOCKB, KNOCKA, KNOCKB; no question), then it drops off USB for 2 s and comes
+// back writable until unplug. 0.3.37-0.3.40 knock by reading PHONE.TXT twice and ask for a green press.
 // Send = a new REQ-<n>.TXT (one JSON request). Answers come back in ANSWER.TXT ("#<count>", then JSON lines).
 import Foundation
 import SwiftUI
@@ -47,6 +47,7 @@ final class DriveIO: @unchecked Sendable {
 
     func check() async throws -> URL { try await run { try self.checkNow() } }
     func readOnly() async throws -> Bool { try await run { try self.readOnlyNow() } }
+    func exists(_ name: String) async throws -> Bool { try await run { try self.with { FileManager.default.fileExists(atPath: $0.appendingPathComponent(name).path) } } }
     func read(_ name: String) async throws -> String? { try await run { try self.readNow(name) } }
     func send(_ line: String) async throws -> String { try await run(10) { try self.sendNow(line) } }
     func resolve() async throws -> URL { try await run { try self.resolveNow() } }
@@ -174,12 +175,13 @@ enum DriveError: LocalizedError {
     @Published var name = ""
     @Published var log: [LogLine] = []
     @Published var showPanel = ProcessInfo.processInfo.arguments.contains("-panel") {   // -panel: open on it (screenshots)
-        // closed by any means (X, swipe, Done, by itself): stop asking the wedgie; the page's wait gives up too
-        didSet { if !showPanel { closeWhenIn = false; asking?.cancel() } }
+        didSet { if !showPanel { closeWhenIn = false } }    // closed by any means (X, swipe): the page's wait gives up
     }
     @Published var readOnly = false         // plugged in, not let in yet: it can't take requests
     @Published var wrongPick: String?       // the folder last picked when it wasn't the WEDGIE drive
-    @Published var knocked: Date?           // when we started asking the wedgie (reading PHONE.TXT), until it's writable
+    @Published var knocked: Date?           // when we started knocking, until it's writable
+    /// Its firmware asks for a green press before it turns writable (0.3.37-0.3.40: PHONE.TXT on the drive).
+    @Published var asksFirst = false
     private var asking: Task<Void, Never>?
     /// The page opened the panel to sign: it closes by itself once the phone is in.
     @Published var closeWhenIn = false
@@ -234,7 +236,7 @@ enum DriveError: LocalizedError {
             UserDefaults.standard.set(try url.bookmarkData(), forKey: DriveIO.bookmarkKey)
             note(.info, "picked \(url.lastPathComponent) at \(url.path)")
             state = .away
-            Task { await tick() }       // the panel is up: tick asks right away
+            Task { await tick() }       // tick knocks right away
         } catch {
             note(.error, "couldn't keep the drive: \(error.localizedDescription)")
         }
@@ -261,6 +263,11 @@ enum DriveError: LocalizedError {
             let ro = (try? await io.readOnly()) ?? false
             if ro != readOnly || was != .here {
                 readOnly = ro
+                if ro {
+                    let old = (try? await io.exists("PHONE.TXT")) == true
+                    let new = (try? await io.exists("KNOCKB.TXT")) == true
+                    asksFirst = old && !new
+                }
                 note(.info, ro ? "read-only: not let in yet" : "let in: writable")
                 if !ro { knocked = nil }
             }
@@ -276,8 +283,10 @@ enum DriveError: LocalizedError {
         if was != state {
             note(.info, state == .here ? "wedgie plugged in (\(name))" : "wedgie unplugged")
         }
-        // The panel is up and the wedgie is plugged in but read-only: ask it, without a tap.
-        if (showPanel || closeWhenIn), state == .here, readOnly { ask() }
+        // knocked, then gone for good (unplugged, not the 2 s drop after a knock): not connecting any more
+        if state == .away, let k = knocked, Date().timeIntervalSince(k) > 20 { knocked = nil }
+        // Plugged in but read-only: knock, without a tap (the app is in front: tick only runs then).
+        if state == .here, readOnly { ask() }
         if closeWhenIn && ready {
             closeWhenIn = false
             try? await Task.sleep(for: .milliseconds(900))      // let "Connected" show for a moment
@@ -298,20 +307,26 @@ enum DriveError: LocalizedError {
         }
     }
 
-    /// Ask the wedgie to allow phone txns, and keep asking until it does: read PHONE.TXT every 1.2 s while the
-    /// panel is up and the drive is read-only. Two reads 0.7-10 s apart make it ask; it ignores reads in its first
-    /// 8 s on USB (a Mac reads the whole drive when it mounts it), and we can't know when it was plugged in (the
-    /// app may have been behind), so asking once could land in those 8 s and nothing happened (10-11, "Ask
-    /// again"). Keeping on is safe: once it's writable it ignores more asks, and a no restarts it.
+    /// Knock until the drive is writable, while the app is in front. Firmware 0.3.41+: read KNOCKB, KNOCKA,
+    /// KNOCKB, each 0.3-3 s after the last (0.5 s here), uncached; it turns writable with no question, and a scan
+    /// can't knock (it reads A then B milliseconds apart). Older (0.3.37-0.3.40): PHONE.TXT read twice 0.7-10 s
+    /// apart, not in its first 8 s, then a green press; one read per round, rounds ~2 s apart, does it. Both every
+    /// round: it costs nothing, and we can't know when it was plugged in, so we never wait, we just keep on. Extra
+    /// knocks are ignored once it's writable. (One knock that landed in the old 8 s did nothing: "Ask again",
+    /// 10-11.)
     func ask() {
         guard asking == nil else { return }
         knocked = Date()
-        note(.info, "asking the wedgie to allow phone txns: press green")
+        note(.info, asksFirst ? "knocking (old firmware): press green on the wedgie" : "knocking: it turns writable by itself")
         asking = Task { @MainActor in
-            defer { asking = nil; if !(showPanel || closeWhenIn) { knocked = nil } }
-            while (showPanel || closeWhenIn), state == .here, readOnly, !Task.isCancelled {
+            defer { asking = nil }
+            while timer != nil, state == .here, readOnly, !Task.isCancelled {
+                for f in ["KNOCKB.TXT", "KNOCKA.TXT", "KNOCKB.TXT"] {
+                    _ = try? await io.read(f)
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
                 _ = try? await io.read("PHONE.TXT")
-                try? await Task.sleep(for: .milliseconds(1200))
+                try? await Task.sleep(for: .milliseconds(1000))
             }
         }
     }

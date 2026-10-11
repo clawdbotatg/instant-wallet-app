@@ -85,7 +85,7 @@ struct DrivePanel: View {
         switch drive.state {
         case .unpicked: return drive.wrongPick == nil ? "Find your wedgie" : "That's not your wedgie"
         case .away: return drive.knocked != nil ? "Connecting" : "Plug in your wedgie"
-        case .here: return drive.readOnly ? "Press green" : "Connected"
+        case .here: return drive.readOnly ? (drive.asksFirst ? "Press green" : "Connecting") : "Connected"
         }
     }
 
@@ -93,8 +93,9 @@ struct DrivePanel: View {
         switch drive.state {
         case .unpicked: return drive.wrongPick.map { "You picked \"\($0)\". Tap Browse, then WEDGIE, then Open." }
             ?? "Tap Find my wedgie. Then tap Browse, WEDGIE, Open. Only once."
-        case .away: return drive.knocked != nil ? "Your wedgie is reconnecting." : "Plug it into this iPhone. It connects by itself."
-        case .here: return drive.readOnly ? "Your wedgie asks to allow phone txns. Press its green button." : "Your wedgie is plugged in."
+        case .away: return drive.knocked != nil ? "A few seconds." : "Plug it into this iPhone. It connects by itself."
+        case .here: return drive.readOnly ? (drive.asksFirst ? "Your wedgie asks to allow phone txns. Press its green button."
+            : "A few seconds.") : "Your wedgie is plugged in."
         }
     }
 }
