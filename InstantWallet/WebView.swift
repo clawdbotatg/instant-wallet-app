@@ -30,6 +30,8 @@ private let bridgeJS = """
 // Only a ceiling for a balance that never comes (API down, bad signal): the
 // wallet stays reachable. Never a minimum — ready shows the wallet at once.
 let WAIT_MAX: TimeInterval = 5
+// The hard ceiling: whatever is slow or stuck, the wallet shows this long after launch.
+let LOAD_MAX: TimeInterval = 8
 
 struct WebView: UIViewRepresentable {
     @ObservedObject var nav: Nav
@@ -55,6 +57,9 @@ struct WebView: UIViewRepresentable {
         wv.allowsLinkPreview = false
         context.coordinator.loaded = nav.url
         wv.load(URLRequest(url: nav.url))
+        DispatchQueue.main.asyncAfter(deadline: .now() + LOAD_MAX) { [nav] in
+            if nav.phase == .loading || nav.phase == .waiting { nav.phase = .ready }
+        }
         return wv
     }
 

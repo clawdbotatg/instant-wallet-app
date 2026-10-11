@@ -146,14 +146,12 @@ struct DriveDetails: View {
 
 /// Apple's folder picker. iOS only starts it at a folder this app was given before (the kept bookmark), so the
 /// first time it opens wherever the person last was, and PickerHint shows them the way.
-struct FolderPicker: UIViewControllerRepresentable {
+@MainActor struct FolderPicker: UIViewControllerRepresentable {
     let done: (URL) -> Void
     func makeCoordinator() -> Coord { Coord(done) }
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let p = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
-        var stale = false
-        if let b = UserDefaults.standard.data(forKey: DriveIO.bookmarkKey),
-           let u = try? URL(resolvingBookmarkData: b, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) { p.directoryURL = u }
+        p.directoryURL = Drive.shared.lastURL
         p.delegate = context.coordinator
         return p
     }

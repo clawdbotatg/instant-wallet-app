@@ -17,12 +17,41 @@ struct LogLine: Identifiable {
     enum Kind { case sent, info, error }
 }
 
-/// File work on the drive, off the main thread. Every call resolves the bookmark and opens and closes the
+/// File work on the drive, on its own thread. Every call resolves the bookmark and opens and closes the
 /// security scope itself, so an unplug between calls is just an error, never a stale handle.
-actor DriveIO {
+/// A wedged drive can hang a file call for good (seen 10-10: the app never got past its splash), so every
+/// call gives up after a few seconds and nothing else in the app ever waits on the drive's thread.
+final class DriveIO: @unchecked Sendable {
     static let bookmarkKey = "wedgieDriveBookmark"
+    private let q = DispatchQueue(label: "io.instantwallet.drive")
+    private let lock = NSLock()
+    private var queued = 0
 
-    func resolve() throws -> URL {
+    /// Run body on the drive's thread; "plug in your wedgie" if it takes longer than `limit` or calls pile up
+    /// behind a hung one.
+    private func run<T>(_ limit: Double = 4, _ body: @escaping () throws -> T) async throws -> T {
+        lock.lock()
+        if queued >= 3 { lock.unlock(); throw DriveError.away }
+        queued += 1
+        lock.unlock()
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<T, Error>) in
+            let done = Once()
+            q.async {
+                let r = Result { try body() }
+                self.lock.lock(); self.queued -= 1; self.lock.unlock()
+                if done.take() { c.resume(with: r) }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + limit) { if done.take() { c.resume(throwing: DriveError.away) } }
+        }
+    }
+
+    func check() async throws -> URL { try await run { try self.checkNow() } }
+    func readOnly() async throws -> Bool { try await run { try self.readOnlyNow() } }
+    func read(_ name: String) async throws -> String? { try await run { try self.readNow(name) } }
+    func send(_ line: String) async throws -> String { try await run(6) { try self.sendNow(line) } }
+    func resolve() async throws -> URL { try await run { try self.resolveNow() } }
+
+    private func resolveNow() throws -> URL {
         guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) else { throw DriveError.notPicked }
         var stale = false
         let url = try URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
@@ -33,8 +62,8 @@ actor DriveIO {
         return url
     }
 
-    func with<T>(_ body: (URL) throws -> T) throws -> T {
-        let url = try resolve()
+    private func with<T>(_ body: (URL) throws -> T) throws -> T {
+        let url = try resolveNow()
         guard url.startAccessingSecurityScopedResource() else { throw DriveError.noAccess }
         defer { url.stopAccessingSecurityScopedResource() }
         guard (try? url.checkResourceIsReachable()) == true else { throw DriveError.away }
@@ -46,20 +75,20 @@ actor DriveIO {
         ["README.txt", "SKILL.md"].allSatisfy { FileManager.default.fileExists(atPath: root.appending(path: $0).path) }
     }
 
-    /// Plugged in? Returns its folder name, or throws why not.
-    func check() throws -> String {
+    /// Plugged in? Returns its folder, or throws why not.
+    private func checkNow() throws -> URL {
         try with { root in
             guard Self.isWedgie(root) else { throw DriveError.notWedgie }
-            return root.lastPathComponent
+            return root
         }
     }
 
-    func readOnly() throws -> Bool {
+    private func readOnlyNow() throws -> Bool {
         try with { root in (try? root.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly ?? false }
     }
 
     /// Uncached, or iOS hands back its old copy of ANSWER.TXT.
-    func read(_ name: String) throws -> String? {
+    private func readNow(_ name: String) throws -> String? {
         try with { root in
             let file = root.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: file.path) else { return nil }
@@ -75,7 +104,7 @@ actor DriveIO {
     /// Write a line as a new REQ-<n>.TXT (the wedgie reads each file once, 0.7 s after the last write). Old REQ
     /// files more than 3 s old go first: the wedgie keeps what's written in RAM, 12 sectors at most, and frees a
     /// deleted file's 2 s later. (The page sends one at a time, after the last one's answer.)
-    func send(_ line: String) throws -> String {
+    private func sendNow(_ line: String) throws -> String {
         try with { root in
             let fm = FileManager.default
             for u in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
@@ -104,6 +133,13 @@ actor DriveIO {
     }
 }
 
+/// The first of two racers (the work, the time limit) wins; the other does nothing.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+    func take() -> Bool { lock.lock(); defer { lock.unlock() }; if used { return false }; used = true; return true }
+}
+
 enum DriveError: LocalizedError {
     case notPicked, noAccess, away, notWedgie
     var errorDescription: String? {
@@ -130,6 +166,9 @@ enum DriveError: LocalizedError {
     @Published var knocked: Date?           // when we last knocked: the wedgie is asking on its screen
     /// The page opened the panel to sign: it closes by itself once the phone is in.
     @Published var closeWhenIn = false
+    /// The drive's folder, last time it was seen: where the picker starts (resolving the bookmark on the main
+    /// thread could hang on a wedged drive).
+    var lastURL: URL?
 
     let io = DriveIO()
     private var timer: Timer?
@@ -151,6 +190,7 @@ enum DriveError: LocalizedError {
     }
 
     func start() {
+        if timer == nil { note(.info, "app in front: watching the drive") }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in Task { @MainActor in await Drive.shared.tick() } }
         Task { await tick() }
@@ -188,6 +228,7 @@ enum DriveError: LocalizedError {
     /// Back to no drive picked, to walk through picking it again.
     func forget() {
         UserDefaults.standard.removeObject(forKey: DriveIO.bookmarkKey)
+        lastURL = nil
         state = .unpicked; name = ""; readOnly = false; knocked = nil
         note(.info, "forgot the drive")
     }
@@ -198,7 +239,9 @@ enum DriveError: LocalizedError {
         defer { checking = false }
         let was = state
         do {
-            name = try await io.check()
+            let root = try await io.check()
+            name = root.lastPathComponent
+            lastURL = root
             state = .here
             let ro = (try? await io.readOnly()) ?? false
             if ro != readOnly || was != .here {
@@ -212,6 +255,7 @@ enum DriveError: LocalizedError {
             wrongPick = n
             return
         } catch {
+            if was != .away || !sawAway { note(.info, "drive: \(error.localizedDescription)") }
             state = .away
             sawAway = true
         }

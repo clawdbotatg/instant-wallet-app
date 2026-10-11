@@ -23,6 +23,10 @@ struct InstantWalletApp: App {
     @StateObject private var drive = Drive.shared        // the wedgie, through its WEDGIE drive (Drive.swift)
     @Environment(\.scenePhase) private var phase
 
+    private func driveOn() {
+        if phase == .active && nav.phase == .ready { drive.start() } else { drive.stop() }
+    }
+
     var body: some Scene {
         WindowGroup {
             ZStack {
@@ -33,7 +37,9 @@ struct InstantWalletApp: App {
                 .animation(.easeOut(duration: 0.2), value: nav.phase)
                 .sheet(isPresented: $drive.showPanel) { DrivePanel().environmentObject(drive) }
                 // iOS has no plug-in notice: look at the drive every second while the app is in front
-                .onChange(of: phase, initial: true) { _, p in if p == .active { drive.start() } else { drive.stop() } }
+                // only once the wallet shows: the app's start never waits on the drive
+                .onChange(of: phase, initial: true) { _, _ in driveOn() }
+                .onChange(of: nav.phase) { _, _ in driveOn() }
                 .background(Color("Background"))
                 .preferredColorScheme(.light)
                 // a site link (claim card, camera QR) opens here instead of Safari
