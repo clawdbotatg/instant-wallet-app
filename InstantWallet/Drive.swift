@@ -101,17 +101,18 @@ final class DriveIO: @unchecked Sendable {
         }
     }
 
-    /// Write a line as a new REQ-<n>.TXT (the wedgie reads each file once, 0.7 s after the last write). Old REQ
-    /// files more than 3 s old go first: the wedgie keeps what's written in RAM, 12 sectors at most, and frees a
-    /// deleted file's 2 s later. (The page sends one at a time, after the last one's answer.)
+    /// Write a line as a new REQ-<n>.TXT (the wedgie reads each file once, 0.7 s after the last write). Every old
+    /// REQ file goes first (and iOS's ._REQ twins, and a half-written one from a failed send): the wedgie keeps
+    /// what's written in RAM, 12 sectors at most, and frees a deleted file's 2 s later. Safe because the page sends
+    /// one at a time, only after the last one's answer (so the wedgie has read it). A big tx's pieces filled the
+    /// RAM when only files over 3 s old went (10-10).
     private func sendNow(_ line: String) throws -> String {
         try with { root in
             let fm = FileManager.default
             for u in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
                 let n = u.lastPathComponent.uppercased()
-                guard n.hasPrefix("REQ-"), n.hasSuffix(".TXT") else { continue }
-                let at = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                if Date().timeIntervalSince(at) > 3 { coordinated(u, .forDeleting) { try fm.removeItem(at: $0) } }
+                guard n.hasPrefix("REQ-") || n.hasPrefix("._REQ-") else { continue }
+                coordinated(u, .forDeleting) { try fm.removeItem(at: $0) }
             }
             let d = UserDefaults.standard
             let n = d.integer(forKey: "wedgieReqN") % 9999 + 1
@@ -282,9 +283,14 @@ enum DriveError: LocalizedError {
     /// Send one request line (the page adds its id). Returns the REQ file name.
     func send(_ line: String) async throws -> String {
         let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        let file = try await io.send(text)
-        note(.sent, "\(file): \(text.prefix(200))")
-        return file
+        do {
+            let file = try await io.send(text)
+            note(.sent, "\(file): \(text.prefix(200))")
+            return file
+        } catch {
+            note(.error, "send failed (\(text.count) chars): \(error.localizedDescription)")
+            throw error
+        }
     }
 
     /// Ask the wedgie to let this phone in: read PHONE.TXT twice, 1.2 s apart. The wedgie ignores reads in its
