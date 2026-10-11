@@ -492,6 +492,7 @@ enum DriveError: LocalizedError {
         let args = ProcessInfo.processInfo.arguments
         guard args.contains("-soak"), !soaking else { return }
         soaking = true
+        UIApplication.shared.isIdleTimerDisabled = true     // the screen stays on: a sleeping phone pauses the app
         let cached = args.contains("-soakcache")
         note(.info, "soak: on\(cached ? " (with cached reads)" : "")")
         Task { @MainActor in
