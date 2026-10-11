@@ -186,7 +186,8 @@ final class DriveBridge: NSObject, WKScriptMessageHandlerWithReply {
                 case "status":
                     let state = drive.state == .here && drive.readOnly ? "readonly" : drive.state.rawValue
                     replyHandler(["state": state, "name": drive.name, "panel": drive.showPanel,
-                                  "connecting": drive.knocked != nil, "press": drive.asksFirst], nil)
+                                  "connecting": drive.knocked != nil, "press": drive.asksFirst,
+                                  "healing": drive.healing], nil)
                 case "send":
                     guard let arg else { return replyHandler(nil, "nothing to send") }
                     replyHandler(try await drive.send(arg), nil)

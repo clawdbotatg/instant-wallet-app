@@ -17,8 +17,9 @@ struct LogLine: Identifiable {
     enum Kind { case sent, info, error }
 }
 
-/// File work on the drive, on its own thread. Every call resolves the bookmark and opens and closes the
-/// security scope itself, so an unplug between calls is just an error, never a stale handle.
+/// File work on the drive, on its own thread. The security scope is opened once and held while the drive
+/// answers (see `held`); any failure drops it and the next call resolves the bookmark again, so an unplug
+/// between calls is just an error, never a stale handle.
 /// A wedged drive can hang a file call for good (seen 10-10: the app never got past its splash), so every
 /// call gives up after a few seconds and nothing else in the app ever waits on the drive's thread.
 final class DriveIO: @unchecked Sendable {
@@ -104,26 +105,64 @@ final class DriveIO: @unchecked Sendable {
     }
     func exists(_ name: String) async throws -> Bool { try await run { try self.with { FileManager.default.fileExists(atPath: $0.appendingPathComponent(name).path) } } }
     func read(_ name: String) async throws -> String? { try await run { try self.readNow(name) } }
+    /// A plain read, through iOS's cache, as a Files view would do it. Only the soak test uses it (-soakcache): does a
+    /// cached copy freeze what the uncached reads see? (Bug 1, docs/WEDGIE-PHONE-DEBUG.md.)
+    func readCached(_ name: String) async throws -> Int {
+        try await run { try self.with { root in (try? Data(contentsOf: root.appendingPathComponent(name)))?.count ?? -1 } }
+    }
     func send(_ line: String) async throws -> String { try await run(10) { try self.sendNow(line) } }
     func resolve() async throws -> URL { try await run { try self.resolveNow() } }
 
-    private func resolveNow() throws -> URL {
-        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) else { throw DriveError.notPicked }
+    private func resolveNow(_ saved: Data? = nil) throws -> URL {
+        guard let data = saved ?? Self.bookmark() else { throw DriveError.notPicked }
         var stale = false
-        let url = try URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
-        if stale, url.startAccessingSecurityScopedResource() {
-            defer { url.stopAccessingSecurityScopedResource() }
-            if let fresh = try? url.bookmarkData() { UserDefaults.standard.set(fresh, forKey: Self.bookmarkKey) }
-        }
-        return url
+        return try URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
     }
 
+    /// The saved bookmark. Picking and forgetting set it straight away on the main thread (never through `run`,
+    /// which turns calls away while the drive's thread is stuck: a new pick was lost that way, codex 10-11).
+    private static let bookmarkLock = NSLock()
+    static func bookmark() -> Data? {
+        bookmarkLock.lock(); defer { bookmarkLock.unlock() }
+        return UserDefaults.standard.data(forKey: bookmarkKey)
+    }
+    static func setBookmark(_ data: Data?) {
+        bookmarkLock.lock(); defer { bookmarkLock.unlock() }
+        if let data { UserDefaults.standard.set(data, forKey: bookmarkKey) } else { UserDefaults.standard.removeObject(forKey: bookmarkKey) }
+    }
+    /// Swap in a fresh bookmark only if nobody picked or forgot since `old` was read.
+    private static func refreshBookmark(from old: Data, to fresh: Data) -> Bool {
+        bookmarkLock.lock(); defer { bookmarkLock.unlock() }
+        guard UserDefaults.standard.data(forKey: bookmarkKey) == old else { return false }
+        UserDefaults.standard.set(fresh, forKey: bookmarkKey)
+        return true
+    }
+
+    /// The drive's folder with its scope open, held while it answers: Apple says open a scope once and keep it,
+    /// not per call (this app opened and closed it ~5 times a second, and at 4:40 on 10-11 iOS refused it in the
+    /// middle of a signature, drive still mounted). Each time it opens, the bookmark is made again from it, so it
+    /// names the drive's current mount (bookmarks don't resolve across volume mounts, Apple bug r.102995804; the
+    /// drive remounts after every knock). Only touched on `q`.
+    private var held: URL?
+    private var heldFrom: Data?             // the bookmark `held` came from: a different one saved = picked again
+    private func drop() { held?.stopAccessingSecurityScopedResource(); held = nil; heldFrom = nil }
+    /// Forgotten: let go of the scope. Straight onto the queue, never turned away (it runs once the queue is free).
+    func release() { q.async { self.drop() } }
+
     private func with<T>(_ body: (URL) throws -> T) throws -> T {
-        let url = try resolveNow()
-        guard url.startAccessingSecurityScopedResource() else { throw DriveError.noAccess }
-        defer { url.stopAccessingSecurityScopedResource() }
-        guard (try? url.checkResourceIsReachable()) == true else { throw DriveError.away }
-        return try body(url)
+        guard let saved = Self.bookmark() else { drop(); throw DriveError.notPicked }
+        if held != nil, heldFrom != saved { drop() }
+        let opened = held == nil
+        if opened {
+            let url = try resolveNow(saved)
+            guard url.startAccessingSecurityScopedResource() else { throw DriveError.noAccess }
+            held = url
+            heldFrom = saved
+        }
+        let url = held!
+        guard (try? url.checkResourceIsReachable()) == true else { drop(); throw DriveError.away }
+        if opened, let fresh = try? url.bookmarkData(), Self.refreshBookmark(from: saved, to: fresh) { heldFrom = fresh }
+        do { return try body(url) } catch { drop(); throw error }
     }
 
     /// Is this folder the WEDGIE drive? Every wedgie's drive has these at its top (wedgie firmware/drive.bin).
@@ -226,7 +265,7 @@ enum DriveError: LocalizedError {
     static let shared = Drive()
     enum State: String { case unpicked, away, here }
 
-    @Published var state: State = UserDefaults.standard.data(forKey: DriveIO.bookmarkKey) == nil ? .unpicked : .away
+    @Published var state: State = DriveIO.bookmark() == nil ? .unpicked : .away
     @Published var name = ""
     @Published var log: [LogLine] = []
     @Published var showPanel = ProcessInfo.processInfo.arguments.contains("-panel") {   // -panel: open on it (screenshots)
@@ -248,6 +287,16 @@ enum DriveError: LocalizedError {
     private var timer: Timer?
     private var checking = false
     private var lastHead = Date.distantPast
+    /// Asking the wedgie to remount (heal): the page waits it out instead of failing.
+    @Published var healing = false
+    private var healedAt = Date.distantPast
+    private var lastSent = Date.distantPast
+    /// The wedgie's clock from ANSWER.TXT's first line (" t<ms>", 0.3.45+), stamped at every read that reaches it:
+    /// the last one seen, when, and how many reads in a row came back with the same one.
+    private var lastT = "", lastTAt = Date.distantPast, sameT = 0
+    private var lastError = ""
+    private var soaking = false
+    private var refusedSince: Date?
 
     /// Writable and plugged in: requests can go.
     var ready: Bool { state == .here && !readOnly }
@@ -267,6 +316,7 @@ enum DriveError: LocalizedError {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in Task { @MainActor in await Drive.shared.tick() } }
         Task { await tick() }
+        soak()
     }
 
     func stop() { timer?.invalidate(); timer = nil }
@@ -289,7 +339,7 @@ enum DriveError: LocalizedError {
         }
         wrongPick = nil
         do {
-            UserDefaults.standard.set(try url.bookmarkData(), forKey: DriveIO.bookmarkKey)
+            DriveIO.setBookmark(try url.bookmarkData())     // the next drive call drops the old scope (heldFrom)
             note(.info, "picked \(url.lastPathComponent) at \(url.path)")
             state = .away
             Task { await tick() }       // tick knocks right away
@@ -300,7 +350,8 @@ enum DriveError: LocalizedError {
 
     /// Back to no drive picked, to walk through picking it again.
     func forget() {
-        UserDefaults.standard.removeObject(forKey: DriveIO.bookmarkKey)
+        DriveIO.setBookmark(nil)
+        io.release()
         lastURL = nil
         state = .unpicked; name = ""; readOnly = false; knocked = nil
         note(.info, "forgot the drive")
@@ -316,6 +367,8 @@ enum DriveError: LocalizedError {
             name = root.lastPathComponent
             lastURL = root
             state = .here
+            lastError = ""
+            refusedSince = nil
             let ro = (try? await io.readOnly()) ?? false
             if ro != readOnly || was != .here {
                 readOnly = ro
@@ -333,19 +386,42 @@ enum DriveError: LocalizedError {
             wrongPick = n
             return
         } catch {
-            if was != .away { note(.info, "drive: \(error.localizedDescription)") }
+            let e = error.localizedDescription
+            if was != .away || e != lastError { note(.info, "drive: \(e)") }
+            lastError = e
             state = .away
+            // iOS refused the bookmark while the drive stayed mounted (10-11 4:40, mid-signature): each call opens it
+            // again; still refused after 5 s, only a new pick helps (iOS needs a tap for the picker)
+            if case DriveError.noAccess = error {
+                refusedSince = refusedSince ?? Date()
+                if Date().timeIntervalSince(refusedSince!) > 5 {
+                    note(.error, "iOS keeps refusing the drive: pick it again")
+                    refusedSince = nil
+                    forget()
+                    showPanel = true
+                    return
+                }
+            } else { refusedSince = nil }
         }
         if was != state {
             note(.info, state == .here ? "wedgie plugged in (\(name))" : "wedgie unplugged")
         }
-        // diagnosis (10-11): every 5 s while writable, ANSWER.TXT's first line read two ways (the wedgie refreshes
-        // it every 0.5 s: a frozen line means a cache, or a stuck wedgie)
-        if ready, Date().timeIntervalSince(lastHead) >= 5 {
-            lastHead = Date()
-            let c = (((try? await io.read("ANSWER.TXT")) ?? nil) ?? "").components(separatedBy: "\n")[0]
-            let p = (try? await io.rawHead("ANSWER.TXT")) ?? "?"
-            note(.info, "head c[\(c.trimmingCharacters(in: .whitespaces))] p[\(p.trimmingCharacters(in: .whitespaces))]")
+        // Is what we read real? Every second while writable, read ANSWER.TXT's first line: 0.3.45+ stamps its clock
+        // into it at every read that reaches the wedgie. The same stamp three reads running (2 s) = iOS is serving
+        // a cached copy (bug 1: minutes, after a re-pick): ask the wedgie to remount. Logged every 5 s.
+        if ready, !healing, Date().timeIntervalSince(lastTAt) >= 1 {
+            let head = (((try? await io.read("ANSWER.TXT")) ?? nil) ?? "").components(separatedBy: "\n")[0]
+            if let r = head.range(of: #" t\d{10}"#, options: .regularExpression) {
+                let t = String(head[r])
+                sameT = t == lastT ? sameT + 1 : 0
+                lastT = t
+                if sameT >= 2 { heal("ANSWER.TXT came back the same 3 times in 2 s: [\(head)]") }
+            }
+            lastTAt = Date()
+            if Date().timeIntervalSince(lastHead) >= 5 {
+                lastHead = Date()
+                note(.info, "head [\(head.trimmingCharacters(in: .whitespaces))]")
+            }
         }
         // knocked, then gone for good (unplugged, not the 2 s drop after a knock): not connecting any more
         if state == .away, let k = knocked, Date().timeIntervalSince(k) > 20 { knocked = nil }
@@ -363,24 +439,88 @@ enum DriveError: LocalizedError {
         let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             let file = try await io.send(text)
+            lastSent = Date()
             note(.sent, "\(file): \(text.prefix(200))")
-            Task {                      // what the drive shows 3 s later: did the wedgie answer? (diagnosis, 10-11)
-                try? await Task.sleep(for: .seconds(3))
-                let a = ((try? await io.read("ANSWER.TXT")) ?? nil)?.replacingOccurrences(of: "\0", with: "")
-                    .split(separator: "\n").filter { !$0.isEmpty }.joined(separator: " | ") ?? "?"
-                note(.info, "3 s after \(file): answers [\(a)] files [\((try? await io.listing()) ?? "?")]")
-                // read the request back, uncached: the wedgie's copy, if it has one (all zeros: the write never
-                // reached it; text: it has it but didn't read it). A request it read comes back zeros too.
-                let back = ((try? await io.read(file)) ?? nil) ?? "(none)"
-                let shown = back.unicodeScalars.prefix(40).map { $0.value < 32 || $0.value > 126 ? "·" : String($0) }.joined()
-                note(.info, "read back \(file): [\(shown)]")
-                let coord = (((try? await io.read("ANSWER.TXT")) ?? nil) ?? "").components(separatedBy: "\n")[0]
-                note(.info, "head coordinated [\(coord)] posix [\((try? await io.rawHead("ANSWER.TXT")) ?? "?")]")
-            }
             return file
         } catch {
             note(.error, "send failed (\(text.count) chars): \(error.localizedDescription)")
             throw error
+        }
+    }
+
+    /// iOS is serving a cached copy of the drive (bug 1): ask the wedgie to remount (0.3.45+, `{"type":"remount"}`;
+    /// writes still reach it while reads are stale). It answers, drops off USB for 2 s and comes back writable, and
+    /// iOS mounts it again with nothing cached. The page sees `healing` and waits instead of failing. At most once
+    /// every 20 s.
+    func heal(_ why: String) {
+        guard !healing, Date().timeIntervalSince(healedAt) > 20 else { return }
+        healing = true
+        healedAt = Date()
+        note(.error, "stale view: \(why). Asking the wedgie to remount.")
+        Task { @MainActor in
+            defer { healing = false; sameT = 0; lastT = "" }
+            // the page's last request: the wedgie reads it 0.7 s after the last write, and our send deletes old REQ files
+            let wait = 1.5 - Date().timeIntervalSince(lastSent)
+            if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+            do { _ = try await send(#"{"type":"remount","id":\#(Int.random(in: 1...999_999_999))}"#) }
+            catch { note(.error, "remount: couldn't send it (\(error.localizedDescription))"); return }
+            let t0 = Date()
+            var gone = false
+            while Date().timeIntervalSince(t0) < 15 {
+                try? await Task.sleep(for: .milliseconds(250))
+                if state != .here { gone = true }
+                if gone && ready {
+                    note(.info, "remounted: back in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+                    return
+                }
+            }
+            note(.error, "remount: no drop and return in 15 s (gone: \(gone))")
+        }
+    }
+
+    /// The soak test (launch with -soak; -soakcache also does a cached read every 5th round, to try to cause bug 1):
+    /// requests nonstop with no taps (hello, then 4 safe_data pieces, never a signature), one log line each with its
+    /// time. Started from a Mac: devicectl device process launch ... io.instantwallet -soak. Needs the Safe signer
+    /// app running on the wedgie (safe_data); a hello alone works on anything.
+    func soak() {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.contains("-soak"), !soaking else { return }
+        soaking = true
+        let cached = args.contains("-soakcache")
+        note(.info, "soak: on\(cached ? " (with cached reads)" : "")")
+        Task { @MainActor in
+            var round = 0, ok = 0, bad = 0
+            var id = Int.random(in: 1_000_000...9_000_000) * 100
+            while true {
+                guard ready, !healing else { try? await Task.sleep(for: .seconds(1)); continue }
+                round += 1
+                if cached, round % 5 == 0 {
+                    let n = (try? await io.readCached("ANSWER.TXT")) ?? -2
+                    note(.info, "soak: cached read of ANSWER.TXT (\(n) bytes)")
+                }
+                var lines = [#"{"type":"hello""#]
+                for at in stride(from: 0, to: 2800, by: 700) {
+                    lines.append(#"{"type":"safe_data","at":\#(at),"hex":"\#(String(repeating: "00", count: 700))""#)
+                }
+                for l in lines {
+                    id += 1
+                    let t0 = Date()
+                    let type = l.contains("hello") ? "hello" : "safe_data"
+                    do { _ = try await send(l + #","id":\#(id)}"#) }
+                    catch { bad += 1; note(.error, "soak \(round): \(type) \(id) send failed: \(error.localizedDescription)"); break }
+                    var got = false
+                    while Date().timeIntervalSince(t0) < 20, !got {
+                        try? await Task.sleep(for: .milliseconds(300))
+                        let a = ((try? await io.read("ANSWER.TXT")) ?? nil) ?? ""
+                        got = a.contains(#""id": \#(id),"#) || a.contains(#""id": \#(id)}"#)
+                    }
+                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                    if got { ok += 1; note(.info, "soak \(round): \(type) \(id) answered in \(ms) ms (ok \(ok), bad \(bad))") }
+                    else { bad += 1; note(.error, "soak \(round): \(type) \(id) NO ANSWER in \(ms) ms (ok \(ok), bad \(bad))"); break }
+                    try? await Task.sleep(for: .milliseconds(300))
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 
