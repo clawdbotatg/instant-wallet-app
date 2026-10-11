@@ -173,7 +173,10 @@ enum DriveError: LocalizedError {
     @Published var state: State = UserDefaults.standard.data(forKey: DriveIO.bookmarkKey) == nil ? .unpicked : .away
     @Published var name = ""
     @Published var log: [LogLine] = []
-    @Published var showPanel = ProcessInfo.processInfo.arguments.contains("-panel")   // -panel: open on it (screenshots)
+    @Published var showPanel = ProcessInfo.processInfo.arguments.contains("-panel") {   // -panel: open on it (screenshots)
+        // closed by any means (X, swipe, Done, by itself): stop asking the wedgie; the page's wait gives up too
+        didSet { if !showPanel { closeWhenIn = false; asking?.cancel() } }
+    }
     @Published var readOnly = false         // plugged in, not let in yet: it can't take requests
     @Published var wrongPick: String?       // the folder last picked when it wasn't the WEDGIE drive
     @Published var knocked: Date?           // when we started asking the wedgie (reading PHONE.TXT), until it's writable
