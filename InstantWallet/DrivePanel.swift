@@ -90,8 +90,8 @@ struct DrivePanel: View {
 
     private var subtitle: String {
         switch drive.state {
-        case .unpicked: return drive.wrongPick.map { "You picked \"\($0)\". Go back to Locations, pick WEDGIE, tap Open." }
-            ?? "Plug it in. Tap Find my wedgie, go back to Locations, pick WEDGIE, tap Open. Only once."
+        case .unpicked: return drive.wrongPick.map { "You picked \"\($0)\". Tap Browse, then WEDGIE, then Open." }
+            ?? "Tap Find my wedgie. Then tap Browse, WEDGIE, Open. Only once."
         case .away: return drive.knocked != nil ? "Your wedgie is reconnecting." : "Plug it into this iPhone. It connects by itself."
         case .here: return drive.readOnly ? (drive.knocked == nil ? "Your wedgie asks first." : "Your wedgie is asking. Press its green button.")
             : "Your wedgie is plugged in."
@@ -165,8 +165,9 @@ struct FolderPicker: UIViewControllerRepresentable {
     }
 }
 
-/// A picture of the next screen (Apple's picker), drawn as a small phone so nobody taps it: WEDGIE at the
-/// top and its blue Open in the top right, ringed, an arrow at it.
+/// A picture of the next screen (Apple's picker, its Browse tab), drawn as a small phone so nobody taps it:
+/// Locations with WEDGIE ringed, and the Browse tab ringed. The first pick opens wherever the person last was
+/// (often Recents: no back button there, so Browse is the way in).
 struct PickerHint: View {
     @State private var bob = false
     private let red = Color(red: 0.89, green: 0.19, blue: 0.17)
@@ -174,48 +175,72 @@ struct PickerHint: View {
         VStack(spacing: 8) {
             Text("NEXT SCREEN").font(.system(size: 13, weight: .heavy, design: .rounded)).foregroundStyle(muted).kerning(1.2)
             ZStack(alignment: .top) {
-                UnevenRoundedRectangle(topLeadingRadius: 40, topTrailingRadius: 40).fill(Color(white: 0.12))
-                UnevenRoundedRectangle(topLeadingRadius: 33, topTrailingRadius: 33).fill(Color(white: 0.9)).padding([.top, .horizontal], 7)
-                Capsule().fill(Color(white: 0.12)).frame(width: 64, height: 18).padding(.top, 16)
-                VStack(spacing: 0) {
-                    HStack(spacing: 0) {
-                        Image(systemName: "chevron.left").font(.system(size: 13, weight: .bold)).foregroundStyle(ink)
-                            .frame(width: 28, height: 28).background(Circle().fill(Color(white: 0.93)))
-                        Spacer()
-                        Text("WEDGIE").font(.system(size: 14, weight: .bold)).foregroundStyle(ink)
-                        Spacer()
-                        Text("Open").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                            .padding(.horizontal, 12).frame(height: 28).background(Capsule().fill(Color.blue))
-                            .overlay(Capsule().stroke(red, lineWidth: 3).padding(-5))
-                            .scaleEffect(bob ? 1.06 : 1)
+                RoundedRectangle(cornerRadius: 34).fill(Color(white: 0.12))
+                RoundedRectangle(cornerRadius: 27).fill(Color(white: 0.95)).padding(7)
+                Capsule().fill(Color(white: 0.12)).frame(width: 56, height: 16).padding(.top, 15)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Locations").font(.system(size: 13, weight: .bold)).foregroundStyle(ink).padding(.leading, 6)
+                    VStack(spacing: 0) {
+                        row("cloud", "iCloud Drive", false)
+                        row("iphone", "On My iPhone", false)
+                        row("externaldrive", "WEDGIE", true)
                     }
-                    .padding(.horizontal, 12).padding(.top, 12)
-                    ForEach(["README.txt", "SKILL.md"], id: \.self) { f in
-                        HStack(spacing: 8) {
-                            Image(systemName: "doc").font(.system(size: 13)).foregroundStyle(muted)
-                            Text(f).font(.system(size: 12)).foregroundStyle(muted)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 16).padding(.top, 10)
-                    }
+                    .background(RoundedRectangle(cornerRadius: 12).fill(.white))
+                    .padding(.top, 6)
                     Spacer(minLength: 0)
+                    HStack(spacing: 0) {
+                        tab("clock", "Recents", false)
+                        tab("folder.badge.person.crop", "Shared", false)
+                        tab("folder.fill", "Browse", true)
+                    }
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(.white))
+                    .padding(.bottom, 4)
                 }
-                .background(UnevenRoundedRectangle(topLeadingRadius: 18, topTrailingRadius: 18).fill(.white))
-                .padding(.horizontal, 7).padding(.top, 44)
+                .padding(.horizontal, 16).padding(.top, 40).padding(.bottom, 12)
             }
-            .frame(width: 230, height: 150)
-            .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
+            .frame(width: 230, height: 250)
             .overlay(alignment: .topTrailing) {
                 HStack(alignment: .top, spacing: 2) {
-                    Image(systemName: "arrow.up.left").font(.system(size: 26, weight: .black))
-                    Text("tap Open").font(.system(size: 16, weight: .heavy, design: .rounded)).padding(.top, 18)
+                    Image(systemName: "arrow.left").font(.system(size: 24, weight: .black))
+                    Text("2. WEDGIE").font(.system(size: 15, weight: .heavy, design: .rounded)).padding(.top, 3)
                 }
-                .foregroundStyle(red)
-                .offset(x: 74, y: bob ? 84 : 90)
+                .foregroundStyle(red).fixedSize()
+                .offset(x: 96 + (bob ? -4 : 0), y: 117)
             }
+            .overlay(alignment: .bottomTrailing) {
+                HStack(alignment: .top, spacing: 2) {
+                    Image(systemName: "arrow.left").font(.system(size: 24, weight: .black))
+                    Text("1. Browse").font(.system(size: 15, weight: .heavy, design: .rounded)).padding(.top, 3)
+                }
+                .foregroundStyle(red).fixedSize()
+                .offset(x: 96 + (bob ? -4 : 0), y: -22)
+            }
+            Text("3. tap Open").font(.system(size: 15, weight: .heavy, design: .rounded)).foregroundStyle(red)
         }
-        .padding(.trailing, 50)
+        .padding(.trailing, 70)
         .onAppear { withAnimation(.easeInOut(duration: 0.7).repeatForever()) { bob = true } }
+    }
+
+    private func row(_ icon: String, _ name: String, _ hot: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(Color.blue).frame(width: 18)
+            Text(name).font(.system(size: 12, weight: hot ? .bold : .regular)).foregroundStyle(hot ? ink : muted)
+            Spacer()
+            Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(muted)
+        }
+        .padding(.horizontal, 10).frame(height: 28)
+        .overlay(hot ? RoundedRectangle(cornerRadius: 9).stroke(red, lineWidth: 3).padding(1) : nil)
+    }
+
+    private func tab(_ icon: String, _ name: String, _ hot: Bool) -> some View {
+        VStack(spacing: 1) {
+            Image(systemName: icon).font(.system(size: 12))
+            Text(name).font(.system(size: 8, weight: .medium))
+        }
+        .foregroundStyle(hot ? Color.blue : ink)
+        .frame(maxWidth: .infinity, minHeight: 30)
+        .overlay(hot ? Capsule().stroke(red, lineWidth: 3).padding(.horizontal, 2) : nil)
     }
 }
 
