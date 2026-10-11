@@ -165,7 +165,7 @@ enum DriveError: LocalizedError {
     }
 }
 
-/// What the panel and the page see. Polls the drive every second while the app is in front.
+/// What the panel and the page see. Polls the drive every half second while the app is in front.
 @MainActor final class Drive: ObservableObject {
     static let shared = Drive()
     enum State: String { case unpicked, away, here }
@@ -208,7 +208,7 @@ enum DriveError: LocalizedError {
     func start() {
         if timer == nil { note(.info, "app in front: watching the drive") }
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in Task { @MainActor in await Drive.shared.tick() } }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in Task { @MainActor in await Drive.shared.tick() } }
         Task { await tick() }
     }
 
@@ -305,15 +305,18 @@ enum DriveError: LocalizedError {
         }
     }
 
-    /// Ask the wedgie to let this phone in: read PHONE.TXT twice, 1.2 s apart. The wedgie ignores reads in its
-    /// first 8 s on USB (a Mac reads the whole drive when it mounts), so wait those out.
+    /// Ask the wedgie to allow phone txns: read PHONE.TXT, 1.2 s apart. It ignores reads in its first 8 s on USB
+    /// (a Mac reads the whole drive when it mounts it), counted from its plug-in, which was before we saw it
+    /// (USB, then iOS mounting it). So: three reads from 6.5 s after we saw it. The first two after its 8 s are
+    /// the knock, wherever its 8 s ended (it can't end after we saw it + 8 s). A third read left over is
+    /// harmless. Waiting 8.5 s from when we saw it, then two reads, was about 2 s too long.
     func knock(user: Bool = true) async {
         guard !knocking else { return }
         knocking = true
         defer { knocking = false; waking = false }
         if user { autoAsks = 0 }
         knocked = Date()
-        let early = 8.5 - Date().timeIntervalSince(hereSince)
+        let early = 6.5 - Date().timeIntervalSince(hereSince)
         if early > 0 {
             waking = true
             note(.info, "knock in \(Int(early.rounded(.up))) s (the wedgie just plugged in)")
@@ -323,8 +326,10 @@ enum DriveError: LocalizedError {
         guard state == .here, readOnly else { return }
         knocked = Date()
         note(.info, "knock\(user ? "" : " (by itself)"): press green on the wedgie")
-        _ = try? await io.read("PHONE.TXT")
-        try? await Task.sleep(for: .milliseconds(1200))
-        _ = try? await io.read("PHONE.TXT")
+        for i in 0..<3 {
+            if i > 0 { try? await Task.sleep(for: .milliseconds(1200)) }
+            guard state == .here, readOnly else { return }
+            _ = try? await io.read("PHONE.TXT")
+        }
     }
 }
