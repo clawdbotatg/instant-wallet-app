@@ -12,6 +12,7 @@
 //        send(line)    -> the REQ file name it wrote (one JSON request, with its id)
 //        read(name)    -> the file's text, or null
 //        panel(mode)   -> opens the wedgie panel; "connect": close it once the drive is writable
+//        log(text)     -> a line in the app's log (Documents/log.txt), "page: ..."
 import SwiftUI
 import WebKit
 
@@ -24,6 +25,7 @@ private let bridgeJS = """
     send: (line) => call("send", typeof line === "string" ? line : JSON.stringify(line)),
     read: (name) => call("read", name),
     panel: (mode) => call("panel", mode || ""),
+    log: (text) => call("log", String(text).slice(0, 2000)),
   };
 })();
 """
@@ -190,6 +192,9 @@ final class DriveBridge: NSObject, WKScriptMessageHandlerWithReply {
                     replyHandler(try await drive.send(arg), nil)
                 case "read":
                     replyHandler(try await drive.io.read(arg ?? "ANSWER.TXT"), nil)
+                case "log":                 // the page's side of a drive conversation, in the same log
+                    drive.note(.info, "page: \(arg ?? "")")
+                    replyHandler(true, nil)
                 case "panel":
                     drive.open(connect: arg == "connect")
                     replyHandler(true, nil)

@@ -313,7 +313,7 @@ enum DriveError: LocalizedError {
             Task {                      // what the drive shows 3 s later: did the wedgie answer? (diagnosis, 10-11)
                 try? await Task.sleep(for: .seconds(3))
                 let a = ((try? await io.read("ANSWER.TXT")) ?? nil)?.replacingOccurrences(of: "\0", with: "")
-                    .split(separator: "\n").filter { !$0.isEmpty }.map { String($0.prefix(60)) }.suffix(3).joined(separator: " | ") ?? "?"
+                    .split(separator: "\n").filter { !$0.isEmpty }.joined(separator: " | ") ?? "?"
                 note(.info, "3 s after \(file): answers [\(a)] files [\((try? await io.listing()) ?? "?")]")
             }
             return file
