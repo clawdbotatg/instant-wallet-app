@@ -51,9 +51,54 @@ final class DriveIO: @unchecked Sendable {
     func listing() async throws -> String {
         try await run {
             try self.with { root in
-                ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey])) ?? [])
-                    .map { u in "\(u.lastPathComponent) \((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1)" }
-                    .filter { !$0.hasPrefix(".") }.sorted().joined(separator: ", ")
+                // hidden files too: iOS's own (._ AppleDouble, .Trashes) take the wedgie's 12 sectors of RAM
+                ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey], options: [])) ?? [])
+                    .map { u in
+                        let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                        return "\(u.lastPathComponent) \(v?.fileSize ?? -1) \(v?.contentModificationDate.map { Int($0.timeIntervalSince1970) % 100000 } ?? 0)"
+                    }
+                    .sorted().joined(separator: ", ")
+            }
+        }
+    }
+    /// iOS's own hidden writes on the drive (FileManager hides AppleDouble ._ files): the root's xattrs and
+    /// every ._ file with its size and time. For the log.
+    func hidden() async throws -> String {
+        try await run {
+            try self.with { root in
+                var out: [String] = []
+                let n = listxattr(root.path, nil, 0, 0)
+                if n > 0 {
+                    var buf = [CChar](repeating: 0, count: n)
+                    listxattr(root.path, &buf, n, 0)
+                    out.append("xattrs: " + String(decoding: buf.map { UInt8(bitPattern: $0 == 0 ? 44 : $0) }, as: UTF8.self))
+                }
+                if let d = opendir(root.path) {
+                    while let e = readdir(d) {
+                        let name = withUnsafePointer(to: e.pointee.d_name) { String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self)) }
+                        guard name.hasPrefix("._") || name.hasPrefix(".T") || name.hasPrefix(".S") else { continue }
+                        var st = stat()
+                        stat(root.appendingPathComponent(name).path, &st)
+                        out.append("\(name) \(st.st_size) \(st.st_mtimespec.tv_sec % 100000)")
+                    }
+                    closedir(d)
+                }
+                return out.joined(separator: "; ")
+            }
+        }
+    }
+    /// The same file read a second way, POSIX open + F_NOCACHE (not NSFileCoordinator): its first line. For
+    /// the log: if this one moves and the coordinated read doesn't, iOS is serving the other from a cache.
+    func rawHead(_ name: String) async throws -> String {
+        try await run {
+            try self.with { root in
+                let fd = open(root.appendingPathComponent(name).path, O_RDONLY)
+                guard fd >= 0 else { return "open failed \(errno)" }
+                defer { close(fd) }
+                _ = fcntl(fd, F_NOCACHE, 1)
+                var buf = [UInt8](repeating: 0, count: 64)
+                let n = Darwin.read(fd, &buf, 64)
+                return n > 0 ? String(decoding: buf[0..<n], as: UTF8.self).components(separatedBy: "\n")[0] : "read \(n) errno \(errno)"
             }
         }
     }
@@ -202,6 +247,7 @@ enum DriveError: LocalizedError {
     let io = DriveIO()
     private var timer: Timer?
     private var checking = false
+    private var lastHead = Date.distantPast
 
     /// Writable and plugged in: requests can go.
     var ready: Bool { state == .here && !readOnly }
@@ -293,6 +339,14 @@ enum DriveError: LocalizedError {
         if was != state {
             note(.info, state == .here ? "wedgie plugged in (\(name))" : "wedgie unplugged")
         }
+        // diagnosis (10-11): every 5 s while writable, ANSWER.TXT's first line read two ways (the wedgie refreshes
+        // it every 0.5 s: a frozen line means a cache, or a stuck wedgie)
+        if ready, Date().timeIntervalSince(lastHead) >= 5 {
+            lastHead = Date()
+            let c = (((try? await io.read("ANSWER.TXT")) ?? nil) ?? "").components(separatedBy: "\n")[0]
+            let p = (try? await io.rawHead("ANSWER.TXT")) ?? "?"
+            note(.info, "head c[\(c.trimmingCharacters(in: .whitespaces))] p[\(p.trimmingCharacters(in: .whitespaces))]")
+        }
         // knocked, then gone for good (unplugged, not the 2 s drop after a knock): not connecting any more
         if state == .away, let k = knocked, Date().timeIntervalSince(k) > 20 { knocked = nil }
         // Plugged in but read-only: knock, without a tap (the app is in front: tick only runs then).
@@ -315,6 +369,13 @@ enum DriveError: LocalizedError {
                 let a = ((try? await io.read("ANSWER.TXT")) ?? nil)?.replacingOccurrences(of: "\0", with: "")
                     .split(separator: "\n").filter { !$0.isEmpty }.joined(separator: " | ") ?? "?"
                 note(.info, "3 s after \(file): answers [\(a)] files [\((try? await io.listing()) ?? "?")]")
+                // read the request back, uncached: the wedgie's copy, if it has one (all zeros: the write never
+                // reached it; text: it has it but didn't read it). A request it read comes back zeros too.
+                let back = ((try? await io.read(file)) ?? nil) ?? "(none)"
+                let shown = back.unicodeScalars.prefix(40).map { $0.value < 32 || $0.value > 126 ? "·" : String($0) }.joined()
+                note(.info, "read back \(file): [\(shown)]")
+                let coord = (((try? await io.read("ANSWER.TXT")) ?? nil) ?? "").components(separatedBy: "\n")[0]
+                note(.info, "head coordinated [\(coord)] posix [\((try? await io.rawHead("ANSWER.TXT")) ?? "?")]")
             }
             return file
         } catch {
