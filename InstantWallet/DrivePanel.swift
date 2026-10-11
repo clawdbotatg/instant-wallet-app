@@ -61,17 +61,14 @@ struct DrivePanel: View {
                     .font(.system(size: 19, weight: .medium, design: .rounded)).foregroundStyle(muted)
                     .multilineTextAlignment(.center).padding(.top, 10)
                 if drive.state == .unpicked { PickerHint().padding(.top, 30) }
-                if drive.knocked != nil && (drive.readOnly || drive.state == .away) { WaitBar().padding(.top, 30) }
+                if drive.state == .here && drive.readOnly || drive.state == .away && drive.knocked != nil { WaitBar().padding(.top, 30) }
                 Spacer()
                 switch drive.state {
                 case .unpicked: PillButton(title: "Find my wedgie") { picking = true }
                 case .here:
                     if drive.ready { PillButton(title: "Done") { dismiss() } }
-                    // asked by itself: Ask again only once the wedgie had time to answer
-                    else { TimelineView(.periodic(from: .now, by: 1)) { t in
-                        if drive.knocked == nil { PillButton(title: "Allow phone txns") { Task { await drive.knock() } } }
-                        else if !drive.waking, t.date.timeIntervalSince(drive.knocked!) > 10 { PillButton(title: "Ask again") { Task { await drive.knock() } } }
-                    } }
+                    // read-only: the panel asks the wedgie by itself, over and over, until it's allowed (no button)
+                    else { EmptyView() }
                 case .away: EmptyView()
                 }
                 Button("Details") { details = true }
@@ -88,7 +85,7 @@ struct DrivePanel: View {
         switch drive.state {
         case .unpicked: return drive.wrongPick == nil ? "Find your wedgie" : "That's not your wedgie"
         case .away: return drive.knocked != nil ? "Connecting" : "Plug in your wedgie"
-        case .here: return drive.readOnly ? (drive.waking ? "Waking up" : drive.knocked == nil ? "Allow this phone" : "Press green") : "Connected"
+        case .here: return drive.readOnly ? "Press green" : "Connected"
         }
     }
 
@@ -97,9 +94,7 @@ struct DrivePanel: View {
         case .unpicked: return drive.wrongPick.map { "You picked \"\($0)\". Tap Browse, then WEDGIE, then Open." }
             ?? "Tap Find my wedgie. Then tap Browse, WEDGIE, Open. Only once."
         case .away: return drive.knocked != nil ? "Your wedgie is reconnecting." : "Plug it into this iPhone. It connects by itself."
-        case .here: return drive.readOnly ? (drive.waking ? "Your wedgie just plugged in. A few seconds." : drive.knocked == nil ? "Your wedgie asks before this phone can send it transactions."
-                : "Your wedgie is asking. Press its green button.")
-            : "Your wedgie is plugged in."
+        case .here: return drive.readOnly ? "Your wedgie asks to allow phone txns. Press its green button." : "Your wedgie is plugged in."
         }
     }
 }

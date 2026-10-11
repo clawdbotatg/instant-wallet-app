@@ -176,10 +176,8 @@ enum DriveError: LocalizedError {
     @Published var showPanel = ProcessInfo.processInfo.arguments.contains("-panel")   // -panel: open on it (screenshots)
     @Published var readOnly = false         // plugged in, not let in yet: it can't take requests
     @Published var wrongPick: String?       // the folder last picked when it wasn't the WEDGIE drive
-    @Published var knocked: Date?           // when we last knocked: the wedgie is asking on its screen
-    @Published var waking = false           // knocking, but the wedgie just plugged in: waiting out its first 8 s
-    private var knocking = false            // one knock at a time: two at once can make it ask twice
-    private var autoAsks = 0                // asks again by itself once after it comes back (a no restarts it)
+    @Published var knocked: Date?           // when we started asking the wedgie (reading PHONE.TXT), until it's writable
+    private var asking: Task<Void, Never>?
     /// The page opened the panel to sign: it closes by itself once the phone is in.
     @Published var closeWhenIn = false
     /// The drive's folder, last time it was seen: where the picker starts (resolving the bookmark on the main
@@ -189,8 +187,6 @@ enum DriveError: LocalizedError {
     let io = DriveIO()
     private var timer: Timer?
     private var checking = false
-    private var hereSince = Date.distantPast    // when we saw it plugged in (not already there at launch)
-    private var sawAway = false
 
     /// Writable and plugged in: requests can go.
     var ready: Bool { state == .here && !readOnly }
@@ -214,11 +210,11 @@ enum DriveError: LocalizedError {
 
     func stop() { timer?.invalidate(); timer = nil }
 
-    /// The page asks for the panel. connect: it wants to sign now, so knock right away and close once in.
+    /// The page asks for the panel. connect: it wants to sign now, so ask right away and close once allowed.
     func open(connect: Bool) {
         closeWhenIn = connect && !ready
         showPanel = !(connect && ready)
-        if connect, state == .here, readOnly { Task { await knock() } }
+        if state == .here, readOnly { ask() }
     }
 
     /// From the folder picker (still inside its security scope): keep a bookmark for every later use.
@@ -235,7 +231,7 @@ enum DriveError: LocalizedError {
             UserDefaults.standard.set(try url.bookmarkData(), forKey: DriveIO.bookmarkKey)
             note(.info, "picked \(url.lastPathComponent) at \(url.path)")
             state = .away
-            Task { await tick(); if state == .here && readOnly { await knock() } }   // first pick: ask right away
+            Task { await tick() }       // the panel is up: tick asks right away
         } catch {
             note(.error, "couldn't keep the drive: \(error.localizedDescription)")
         }
@@ -271,20 +267,14 @@ enum DriveError: LocalizedError {
             wrongPick = n
             return
         } catch {
-            if was != .away || !sawAway { note(.info, "drive: \(error.localizedDescription)") }
+            if was != .away { note(.info, "drive: \(error.localizedDescription)") }
             state = .away
-            sawAway = true
         }
         if was != state {
             note(.info, state == .here ? "wedgie plugged in (\(name))" : "wedgie unplugged")
-            if state == .here, sawAway { hereSince = Date() }
         }
-        // The panel is up and the wedgie is plugged in but not letting us write: ask it, without a tap. Once
-        // more by itself when it comes back read-only (it dropped off, or a no restarted it).
-        if (showPanel || closeWhenIn), state == .here, readOnly, !knocking {
-            if knocked == nil { Task { await knock(user: false) } }
-            else if was != .here, autoAsks < 1 { autoAsks += 1; Task { await knock(user: false) } }
-        }
+        // The panel is up and the wedgie is plugged in but read-only: ask it, without a tap.
+        if (showPanel || closeWhenIn), state == .here, readOnly { ask() }
         if closeWhenIn && ready {
             closeWhenIn = false
             try? await Task.sleep(for: .milliseconds(900))      // let "Connected" show for a moment
@@ -305,31 +295,21 @@ enum DriveError: LocalizedError {
         }
     }
 
-    /// Ask the wedgie to allow phone txns: read PHONE.TXT, 1.2 s apart. It ignores reads in its first 8 s on USB
-    /// (a Mac reads the whole drive when it mounts it), counted from its plug-in, which was before we saw it
-    /// (USB, then iOS mounting it). So: three reads from 6.5 s after we saw it. The first two after its 8 s are
-    /// the knock, wherever its 8 s ended (it can't end after we saw it + 8 s). A third read left over is
-    /// harmless. Waiting 8.5 s from when we saw it, then two reads, was about 2 s too long.
-    func knock(user: Bool = true) async {
-        guard !knocking else { return }
-        knocking = true
-        defer { knocking = false; waking = false }
-        if user { autoAsks = 0 }
+    /// Ask the wedgie to allow phone txns, and keep asking until it does: read PHONE.TXT every 1.2 s while the
+    /// panel is up and the drive is read-only. Two reads 0.7-10 s apart make it ask; it ignores reads in its first
+    /// 8 s on USB (a Mac reads the whole drive when it mounts it), and we can't know when it was plugged in (the
+    /// app may have been behind), so asking once could land in those 8 s and nothing happened (10-11, "Ask
+    /// again"). Keeping on is safe: once it's writable it ignores more asks, and a no restarts it.
+    func ask() {
+        guard asking == nil else { return }
         knocked = Date()
-        let early = 6.5 - Date().timeIntervalSince(hereSince)
-        if early > 0 {
-            waking = true
-            note(.info, "knock in \(Int(early.rounded(.up))) s (the wedgie just plugged in)")
-            try? await Task.sleep(for: .seconds(early))
-            waking = false
-        }
-        guard state == .here, readOnly else { return }
-        knocked = Date()
-        note(.info, "knock\(user ? "" : " (by itself)"): press green on the wedgie")
-        for i in 0..<3 {
-            if i > 0 { try? await Task.sleep(for: .milliseconds(1200)) }
-            guard state == .here, readOnly else { return }
-            _ = try? await io.read("PHONE.TXT")
+        note(.info, "asking the wedgie to allow phone txns: press green")
+        asking = Task { @MainActor in
+            defer { asking = nil; if !(showPanel || closeWhenIn) { knocked = nil } }
+            while (showPanel || closeWhenIn), state == .here, readOnly, !Task.isCancelled {
+                _ = try? await io.read("PHONE.TXT")
+                try? await Task.sleep(for: .milliseconds(1200))
+            }
         }
     }
 }
