@@ -47,6 +47,16 @@ final class DriveIO: @unchecked Sendable {
 
     func check() async throws -> URL { try await run { try self.checkNow() } }
     func readOnly() async throws -> Bool { try await run { try self.readOnlyNow() } }
+    /// What's on the drive's top folder as iOS shows it (name size), for the log.
+    func listing() async throws -> String {
+        try await run {
+            try self.with { root in
+                ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey])) ?? [])
+                    .map { u in "\(u.lastPathComponent) \((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1)" }
+                    .filter { !$0.hasPrefix(".") }.sorted().joined(separator: ", ")
+            }
+        }
+    }
     func exists(_ name: String) async throws -> Bool { try await run { try self.with { FileManager.default.fileExists(atPath: $0.appendingPathComponent(name).path) } } }
     func read(_ name: String) async throws -> String? { try await run { try self.readNow(name) } }
     func send(_ line: String) async throws -> String { try await run(10) { try self.sendNow(line) } }
@@ -300,6 +310,12 @@ enum DriveError: LocalizedError {
         do {
             let file = try await io.send(text)
             note(.sent, "\(file): \(text.prefix(200))")
+            Task {                      // what the drive shows 3 s later: did the wedgie answer? (diagnosis, 10-11)
+                try? await Task.sleep(for: .seconds(3))
+                let a = ((try? await io.read("ANSWER.TXT")) ?? nil)?.replacingOccurrences(of: "\0", with: "")
+                    .split(separator: "\n").filter { !$0.isEmpty }.map { String($0.prefix(60)) }.suffix(3).joined(separator: " | ") ?? "?"
+                note(.info, "3 s after \(file): answers [\(a)] files [\((try? await io.listing()) ?? "?")]")
+            }
             return file
         } catch {
             note(.error, "send failed (\(text.count) chars): \(error.localizedDescription)")
