@@ -4,9 +4,28 @@
 //   2. links — window.open / target=_blank and links off the site go to Safari;
 //   3. a killed content process reloads the page instead of a white screen;
 //   4. load state drives the Splash: waiting when the page is up, ready when the
-//      site posts `ready` (balance in) or after WAIT_MAX, offline on a failed load.
+//      site posts `ready` (balance in) or after WAIT_MAX, offline on a failed load;
+//   5. the wedgie: `window.wedgieDrive` (only on the site) reaches a wedgie through its
+//      WEDGIE drive (Drive.swift). The site's web/lib/safe/wedgie.ts uses it:
+//        status()      -> {state: "unpicked"|"away"|"readonly"|"here", name, panel}
+//        send(line)    -> the REQ file name it wrote (one JSON request, with its id)
+//        read(name)    -> the file's text, or null
+//        panel(mode)   -> opens the wedgie panel; "connect": knock now, close once the phone is in
 import SwiftUI
 import WebKit
+
+private let bridgeJS = """
+(() => {
+  if (location.hostname !== "\(SITE.host!)") return;
+  const call = (op, arg) => window.webkit.messageHandlers.wedgieDrive.postMessage({ op, arg });
+  window.wedgieDrive = {
+    status: () => call("status"),
+    send: (line) => call("send", typeof line === "string" ? line : JSON.stringify(line)),
+    read: (name) => call("read", name),
+    panel: (mode) => call("panel", mode || ""),
+  };
+})();
+"""
 
 // Only a ceiling for a balance that never comes (API down, bad signal): the
 // wallet stays reachable. Never a minimum — ready shows the wallet at once.
@@ -23,6 +42,8 @@ struct WebView: UIViewRepresentable {
         cfg.websiteDataStore = .default()        // persistent: localStorage, the wallet
         cfg.applicationNameForUserAgent = "instant-wallet-app"
         cfg.userContentController.add(context.coordinator, name: "ready")   // the site: balance is on screen
+        cfg.userContentController.addUserScript(WKUserScript(source: bridgeJS, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        cfg.userContentController.addScriptMessageHandler(DriveBridge(), contentWorld: .page, name: "wedgieDrive")
 
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.uiDelegate = context.coordinator
@@ -136,6 +157,41 @@ struct WebView: UIViewRepresentable {
             guard let vc = v.window?.rootViewController else { return nil }
             (vc.presentedViewController ?? vc).present(a, animated: true)
             return ()
+        }
+    }
+}
+
+/// window.wedgieDrive's native side. Only the site's own pages get an answer.
+final class DriveBridge: NSObject, WKScriptMessageHandlerWithReply {
+    @MainActor
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage,
+                               replyHandler: @escaping (Any?, String?) -> Void) {
+        guard message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host.lowercased() == SITE.host,
+              let body = message.body as? [String: Any], let op = body["op"] as? String else {
+            return replyHandler(nil, "not allowed")
+        }
+        let arg = body["arg"] as? String
+        let drive = Drive.shared
+        Task { @MainActor in
+            do {
+                switch op {
+                case "status":
+                    let state = drive.state == .here && drive.readOnly ? "readonly" : drive.state.rawValue
+                    replyHandler(["state": state, "name": drive.name, "panel": drive.showPanel], nil)
+                case "send":
+                    guard let arg else { return replyHandler(nil, "nothing to send") }
+                    replyHandler(try await drive.send(arg), nil)
+                case "read":
+                    replyHandler(try await drive.io.read(arg ?? "ANSWER.TXT"), nil)
+                case "panel":
+                    drive.open(connect: arg == "connect")
+                    replyHandler(true, nil)
+                default:
+                    replyHandler(nil, "unknown op \(op)")
+                }
+            } catch {
+                replyHandler(nil, error.localizedDescription)
+            }
         }
     }
 }

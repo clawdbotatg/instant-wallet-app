@@ -20,6 +20,8 @@ final class Nav: ObservableObject {
 @main
 struct InstantWalletApp: App {
     @StateObject private var nav = Nav()
+    @StateObject private var drive = Drive.shared        // the wedgie, through its WEDGIE drive (Drive.swift)
+    @Environment(\.scenePhase) private var phase
 
     var body: some Scene {
         WindowGroup {
@@ -29,6 +31,9 @@ struct InstantWalletApp: App {
                 if nav.phase != .ready { Splash(nav: nav).transition(.opacity) }
             }
                 .animation(.easeOut(duration: 0.2), value: nav.phase)
+                .sheet(isPresented: $drive.showPanel) { DrivePanel().environmentObject(drive) }
+                // iOS has no plug-in notice: look at the drive every second while the app is in front
+                .onChange(of: phase, initial: true) { _, p in if p == .active { drive.start() } else { drive.stop() } }
                 .background(Color("Background"))
                 .preferredColorScheme(.light)
                 // a site link (claim card, camera QR) opens here instead of Safari

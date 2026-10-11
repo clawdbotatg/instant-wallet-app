@@ -1,0 +1,248 @@
+// The WEDGIE drive: how this app reaches a wedgie (an iPhone can't open its USB serial port without MFi, but it
+// mounts USB drives, and every wedgie is one). Ported from wedgie-dev ios/WedgieDrive; the why and the
+// gotchas are in instant-wallet docs/WEDGIE-PHONE.md.
+//
+// Pick the drive's top folder once (a security-scoped bookmark keeps it). The drive is read-only until the
+// wedgie lets the phone in (firmware 0.3.37+): we "knock" by reading PHONE.TXT twice, the wedgie asks, a green
+// press makes it drop off USB for 2 s and come back writable until unplug.
+// Send = a new REQ-<n>.TXT (one JSON request). Answers come back in ANSWER.TXT ("#<count>", then JSON lines).
+import Foundation
+import SwiftUI
+
+struct LogLine: Identifiable {
+    let id = UUID()
+    let at = Date()
+    let kind: Kind
+    let text: String
+    enum Kind { case sent, info, error }
+}
+
+/// File work on the drive, off the main thread. Every call resolves the bookmark and opens and closes the
+/// security scope itself, so an unplug between calls is just an error, never a stale handle.
+actor DriveIO {
+    static let bookmarkKey = "wedgieDriveBookmark"
+
+    func resolve() throws -> URL {
+        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey) else { throw DriveError.notPicked }
+        var stale = false
+        let url = try URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
+        if stale, url.startAccessingSecurityScopedResource() {
+            defer { url.stopAccessingSecurityScopedResource() }
+            if let fresh = try? url.bookmarkData() { UserDefaults.standard.set(fresh, forKey: Self.bookmarkKey) }
+        }
+        return url
+    }
+
+    func with<T>(_ body: (URL) throws -> T) throws -> T {
+        let url = try resolve()
+        guard url.startAccessingSecurityScopedResource() else { throw DriveError.noAccess }
+        defer { url.stopAccessingSecurityScopedResource() }
+        guard (try? url.checkResourceIsReachable()) == true else { throw DriveError.away }
+        return try body(url)
+    }
+
+    /// Is this folder the WEDGIE drive? Every wedgie's drive has these at its top (wedgie firmware/drive.bin).
+    nonisolated static func isWedgie(_ root: URL) -> Bool {
+        ["README.txt", "SKILL.md"].allSatisfy { FileManager.default.fileExists(atPath: root.appending(path: $0).path) }
+    }
+
+    /// Plugged in? Returns its folder name, or throws why not.
+    func check() throws -> String {
+        try with { root in
+            guard Self.isWedgie(root) else { throw DriveError.notWedgie }
+            return root.lastPathComponent
+        }
+    }
+
+    func readOnly() throws -> Bool {
+        try with { root in (try? root.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly ?? false }
+    }
+
+    /// Uncached, or iOS hands back its old copy of ANSWER.TXT.
+    func read(_ name: String) throws -> String? {
+        try with { root in
+            let file = root.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+            var out: Data?, cerr: NSError?, rerr: Error?
+            NSFileCoordinator().coordinate(readingItemAt: file, options: .withoutChanges, error: &cerr) { u in
+                do { out = try Data(contentsOf: u, options: .uncached) } catch { rerr = error }
+            }
+            if let e = cerr ?? rerr { throw e }
+            return String(decoding: (out ?? Data()).prefix(20000), as: UTF8.self)
+        }
+    }
+
+    /// Write a line as a new REQ-<n>.TXT (the wedgie reads each file once, 0.7 s after the last write). Old REQ
+    /// files more than 3 s old go first: the wedgie keeps what's written in RAM, 12 sectors at most, and frees a
+    /// deleted file's 2 s later. (The page sends one at a time, after the last one's answer.)
+    func send(_ line: String) throws -> String {
+        try with { root in
+            let fm = FileManager.default
+            for u in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+                let n = u.lastPathComponent.uppercased()
+                guard n.hasPrefix("REQ-"), n.hasSuffix(".TXT") else { continue }
+                let at = (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                if Date().timeIntervalSince(at) > 3 { coordinated(u, .forDeleting) { try fm.removeItem(at: $0) } }
+            }
+            let d = UserDefaults.standard
+            let n = d.integer(forKey: "wedgieReqN") % 9999 + 1
+            d.set(n, forKey: "wedgieReqN")
+            let name = "REQ-\(n).TXT"
+            let body = Data((line + "\n").utf8)
+            var werr: Error?
+            coordinated(root.appendingPathComponent(name), .forReplacing) { u in
+                do { try body.write(to: u) } catch { werr = error }
+            }
+            if let werr { throw werr }
+            return name
+        }
+    }
+
+    private func coordinated(_ url: URL, _ opts: NSFileCoordinator.WritingOptions, _ body: (URL) throws -> Void) {
+        var err: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: url, options: opts, error: &err) { u in try? body(u) }
+    }
+}
+
+enum DriveError: LocalizedError {
+    case notPicked, noAccess, away, notWedgie
+    var errorDescription: String? {
+        switch self {
+        case .notPicked: return "pick the WEDGIE drive first"
+        case .noAccess: return "iOS said no to the drive: pick it again"
+        case .away: return "plug in your wedgie"
+        case .notWedgie: return "that folder isn't the WEDGIE drive"
+        }
+    }
+}
+
+/// What the panel and the page see. Polls the drive every second while the app is in front.
+@MainActor final class Drive: ObservableObject {
+    static let shared = Drive()
+    enum State: String { case unpicked, away, here }
+
+    @Published var state: State = UserDefaults.standard.data(forKey: DriveIO.bookmarkKey) == nil ? .unpicked : .away
+    @Published var name = ""
+    @Published var log: [LogLine] = []
+    @Published var showPanel = ProcessInfo.processInfo.arguments.contains("-panel")   // -panel: open on it (screenshots)
+    @Published var readOnly = false         // plugged in, not let in yet: it can't take requests
+    @Published var wrongPick: String?       // the folder last picked when it wasn't the WEDGIE drive
+    @Published var knocked: Date?           // when we last knocked: the wedgie is asking on its screen
+    /// The page opened the panel to sign: it closes by itself once the phone is in.
+    @Published var closeWhenIn = false
+
+    let io = DriveIO()
+    private var timer: Timer?
+    private var checking = false
+    private var hereSince = Date.distantPast    // when we saw it plugged in (not already there at launch)
+    private var sawAway = false
+
+    /// Writable and plugged in: requests can go.
+    var ready: Bool { state == .here && !readOnly }
+
+    func note(_ kind: LogLine.Kind, _ text: String) {
+        log.insert(LogLine(kind: kind, text: text), at: 0)
+        if log.count > 200 { log.removeLast() }
+        // Also to Documents/log.txt, so a Mac can read it: devicectl device copy from --domain-type appDataContainer
+        let f = URL.documentsDirectory.appending(path: "log.txt")
+        let line = "\(Date().formatted(date: .omitted, time: .standard)) \(kind) \(text)\n"
+        if let h = try? FileHandle(forWritingTo: f) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+        else { try? Data(line.utf8).write(to: f) }
+    }
+
+    func start() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in Task { @MainActor in await Drive.shared.tick() } }
+        Task { await tick() }
+    }
+
+    func stop() { timer?.invalidate(); timer = nil }
+
+    /// The page asks for the panel. connect: it wants to sign now, so knock right away and close once in.
+    func open(connect: Bool) {
+        closeWhenIn = connect && !ready
+        showPanel = !(connect && ready)
+        if connect, state == .here, readOnly, knocked == nil { Task { await knock() } }
+    }
+
+    /// From the folder picker (still inside its security scope): keep a bookmark for every later use.
+    func picked(_ url: URL) {
+        let ok = url.startAccessingSecurityScopedResource()
+        defer { if ok { url.stopAccessingSecurityScopedResource() } }
+        guard DriveIO.isWedgie(url) else {
+            wrongPick = url.lastPathComponent
+            note(.error, "picked \(url.lastPathComponent): not the WEDGIE drive (no README.txt + SKILL.md)")
+            return
+        }
+        wrongPick = nil
+        do {
+            UserDefaults.standard.set(try url.bookmarkData(), forKey: DriveIO.bookmarkKey)
+            note(.info, "picked \(url.lastPathComponent) at \(url.path)")
+            state = .away
+            Task { await tick(); if state == .here && readOnly { await knock() } }   // first pick: ask right away
+        } catch {
+            note(.error, "couldn't keep the drive: \(error.localizedDescription)")
+        }
+    }
+
+    /// Back to no drive picked, to walk through picking it again.
+    func forget() {
+        UserDefaults.standard.removeObject(forKey: DriveIO.bookmarkKey)
+        state = .unpicked; name = ""; readOnly = false; knocked = nil
+        note(.info, "forgot the drive")
+    }
+
+    func tick() async {
+        guard !checking, state != .unpicked else { return }
+        checking = true
+        defer { checking = false }
+        let was = state
+        do {
+            name = try await io.check()
+            state = .here
+            let ro = (try? await io.readOnly()) ?? false
+            if ro != readOnly || was != .here {
+                readOnly = ro
+                note(.info, ro ? "read-only: not let in yet" : "let in: writable")
+                if !ro { knocked = nil }
+            }
+        } catch DriveError.notWedgie {
+            let n = (try? await io.resolve())?.lastPathComponent ?? ""
+            forget()
+            wrongPick = n
+            return
+        } catch {
+            state = .away
+            sawAway = true
+        }
+        if was != state {
+            note(.info, state == .here ? "wedgie plugged in (\(name))" : "wedgie unplugged")
+            if state == .here, sawAway { hereSince = Date() }
+        }
+        if closeWhenIn && ready {
+            closeWhenIn = false
+            try? await Task.sleep(for: .milliseconds(900))      // let "Connected" show for a moment
+            showPanel = false
+        }
+    }
+
+    /// Send one request line (the page adds its id). Returns the REQ file name.
+    func send(_ line: String) async throws -> String {
+        let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let file = try await io.send(text)
+        note(.sent, "\(file): \(text.prefix(200))")
+        return file
+    }
+
+    /// Ask the wedgie to let this phone in: read PHONE.TXT twice, 1.2 s apart. The wedgie ignores reads in its
+    /// first 8 s on USB (a Mac reads the whole drive when it mounts), so wait those out.
+    func knock() async {
+        knocked = Date()
+        let early = 8.5 - Date().timeIntervalSince(hereSince)
+        if early > 0 { try? await Task.sleep(for: .seconds(early)) }
+        note(.info, "knock: press green on the wedgie")
+        _ = try? await io.read("PHONE.TXT")
+        try? await Task.sleep(for: .milliseconds(1200))
+        _ = try? await io.read("PHONE.TXT")
+    }
+}

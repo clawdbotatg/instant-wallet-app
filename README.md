@@ -23,3 +23,9 @@ Team XX7QP5899Z, bundle id `io.instantwallet`. If you change either, change the 
 If passkeys say "Cancelled" (NotAllowedError) on an Xcode build: the phone hasn't approved the app for the site.
 The `?mode=developer` entries make Xcode builds check the site directly. Turn on Settings → Developer →
 Associated Domains Development, then delete and reinstall the app. TestFlight/App Store builds ignore those entries.
+
+## Wedgie
+
+A wedgie plugs into the iPhone over USB-C as a drive (WEDGIE). `Drive.swift` reads and writes it,
+`DrivePanel.swift` is the screen (pick the drive once, let this phone in), and `window.wedgieDrive` gives the
+site access (`WebView.swift`). The why and the gotchas: instant-wallet `docs/WEDGIE-PHONE.md`.
