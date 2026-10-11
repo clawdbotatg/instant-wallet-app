@@ -67,7 +67,11 @@ struct DrivePanel: View {
                 case .unpicked: PillButton(title: "Find my wedgie") { picking = true }
                 case .here:
                     if drive.ready { PillButton(title: "Done") { dismiss() } }
-                    else { PillButton(title: drive.knocked == nil ? "Let this phone in" : "Ask again") { Task { await drive.knock() } } }
+                    // asked by itself: Ask again only once the wedgie had time to answer
+                    else { TimelineView(.periodic(from: .now, by: 1)) { t in
+                        if drive.knocked == nil { PillButton(title: "Let this phone in") { Task { await drive.knock() } } }
+                        else if !drive.waking, t.date.timeIntervalSince(drive.knocked!) > 10 { PillButton(title: "Ask again") { Task { await drive.knock() } } }
+                    } }
                 case .away: EmptyView()
                 }
                 Button("Details") { details = true }
@@ -84,7 +88,7 @@ struct DrivePanel: View {
         switch drive.state {
         case .unpicked: return drive.wrongPick == nil ? "Find your wedgie" : "That's not your wedgie"
         case .away: return drive.knocked != nil ? "Connecting" : "Plug in your wedgie"
-        case .here: return drive.readOnly ? (drive.knocked == nil ? "Let this phone in" : "Press green") : "Connected"
+        case .here: return drive.readOnly ? (drive.waking ? "Waking up" : drive.knocked == nil ? "Let this phone in" : "Press green") : "Connected"
         }
     }
 
@@ -93,7 +97,8 @@ struct DrivePanel: View {
         case .unpicked: return drive.wrongPick.map { "You picked \"\($0)\". Tap Browse, then WEDGIE, then Open." }
             ?? "Tap Find my wedgie. Then tap Browse, WEDGIE, Open. Only once."
         case .away: return drive.knocked != nil ? "Your wedgie is reconnecting." : "Plug it into this iPhone. It connects by itself."
-        case .here: return drive.readOnly ? (drive.knocked == nil ? "Your wedgie asks first." : "Your wedgie is asking. Press its green button.")
+        case .here: return drive.readOnly ? (drive.waking ? "Your wedgie just plugged in. A few seconds." : drive.knocked == nil ? "Your wedgie asks first."
+                : "Your wedgie is asking. Press its green button.")
             : "Your wedgie is plugged in."
         }
     }

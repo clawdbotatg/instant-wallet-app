@@ -164,6 +164,9 @@ enum DriveError: LocalizedError {
     @Published var readOnly = false         // plugged in, not let in yet: it can't take requests
     @Published var wrongPick: String?       // the folder last picked when it wasn't the WEDGIE drive
     @Published var knocked: Date?           // when we last knocked: the wedgie is asking on its screen
+    @Published var waking = false           // knocking, but the wedgie just plugged in: waiting out its first 8 s
+    private var knocking = false            // one knock at a time: two at once can make it ask twice
+    private var autoAsks = 0                // asks again by itself once after it comes back (a no restarts it)
     /// The page opened the panel to sign: it closes by itself once the phone is in.
     @Published var closeWhenIn = false
     /// The drive's folder, last time it was seen: where the picker starts (resolving the bookmark on the main
@@ -202,7 +205,7 @@ enum DriveError: LocalizedError {
     func open(connect: Bool) {
         closeWhenIn = connect && !ready
         showPanel = !(connect && ready)
-        if connect, state == .here, readOnly, knocked == nil { Task { await knock() } }
+        if connect, state == .here, readOnly { Task { await knock() } }
     }
 
     /// From the folder picker (still inside its security scope): keep a bookmark for every later use.
@@ -263,6 +266,12 @@ enum DriveError: LocalizedError {
             note(.info, state == .here ? "wedgie plugged in (\(name))" : "wedgie unplugged")
             if state == .here, sawAway { hereSince = Date() }
         }
+        // The panel is up and the wedgie is plugged in but not letting us write: ask it, without a tap. Once
+        // more by itself when it comes back read-only (it dropped off, or a no restarted it).
+        if (showPanel || closeWhenIn), state == .here, readOnly, !knocking {
+            if knocked == nil { Task { await knock(user: false) } }
+            else if was != .here, autoAsks < 1 { autoAsks += 1; Task { await knock(user: false) } }
+        }
         if closeWhenIn && ready {
             closeWhenIn = false
             try? await Task.sleep(for: .milliseconds(900))      // let "Connected" show for a moment
@@ -280,11 +289,22 @@ enum DriveError: LocalizedError {
 
     /// Ask the wedgie to let this phone in: read PHONE.TXT twice, 1.2 s apart. The wedgie ignores reads in its
     /// first 8 s on USB (a Mac reads the whole drive when it mounts), so wait those out.
-    func knock() async {
+    func knock(user: Bool = true) async {
+        guard !knocking else { return }
+        knocking = true
+        defer { knocking = false; waking = false }
+        if user { autoAsks = 0 }
         knocked = Date()
         let early = 8.5 - Date().timeIntervalSince(hereSince)
-        if early > 0 { try? await Task.sleep(for: .seconds(early)) }
-        note(.info, "knock: press green on the wedgie")
+        if early > 0 {
+            waking = true
+            note(.info, "knock in \(Int(early.rounded(.up))) s (the wedgie just plugged in)")
+            try? await Task.sleep(for: .seconds(early))
+            waking = false
+        }
+        guard state == .here, readOnly else { return }
+        knocked = Date()
+        note(.info, "knock\(user ? "" : " (by itself)"): press green on the wedgie")
         _ = try? await io.read("PHONE.TXT")
         try? await Task.sleep(for: .milliseconds(1200))
         _ = try? await io.read("PHONE.TXT")
