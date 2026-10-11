@@ -69,7 +69,7 @@ struct DrivePanel: View {
                     if drive.ready { PillButton(title: "Done") { dismiss() } }
                     // asked by itself: Ask again only once the wedgie had time to answer
                     else { TimelineView(.periodic(from: .now, by: 1)) { t in
-                        if drive.knocked == nil { PillButton(title: "Allow phone to send txns") { Task { await drive.knock() } } }
+                        if drive.knocked == nil { PillButton(title: "Allow phone txns") { Task { await drive.knock() } } }
                         else if !drive.waking, t.date.timeIntervalSince(drive.knocked!) > 10 { PillButton(title: "Ask again") { Task { await drive.knock() } } }
                     } }
                 case .away: EmptyView()
@@ -247,7 +247,7 @@ struct PickerHint: View {
     }
 }
 
-/// After "Allow phone to send txns": a green bar that keeps creeping (slower near the end) until it's connected.
+/// After "Allow phone txns": a green bar that keeps creeping (slower near the end) until it's connected.
 struct WaitBar: View {
     @State private var start = Date()
     var body: some View {
