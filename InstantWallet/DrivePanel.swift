@@ -69,7 +69,7 @@ struct DrivePanel: View {
                     if drive.ready { PillButton(title: "Done") { dismiss() } }
                     // asked by itself: Ask again only once the wedgie had time to answer
                     else { TimelineView(.periodic(from: .now, by: 1)) { t in
-                        if drive.knocked == nil { PillButton(title: "Let this phone in") { Task { await drive.knock() } } }
+                        if drive.knocked == nil { PillButton(title: "Allow phone to send txns") { Task { await drive.knock() } } }
                         else if !drive.waking, t.date.timeIntervalSince(drive.knocked!) > 10 { PillButton(title: "Ask again") { Task { await drive.knock() } } }
                     } }
                 case .away: EmptyView()
@@ -88,7 +88,7 @@ struct DrivePanel: View {
         switch drive.state {
         case .unpicked: return drive.wrongPick == nil ? "Find your wedgie" : "That's not your wedgie"
         case .away: return drive.knocked != nil ? "Connecting" : "Plug in your wedgie"
-        case .here: return drive.readOnly ? (drive.waking ? "Waking up" : drive.knocked == nil ? "Let this phone in" : "Press green") : "Connected"
+        case .here: return drive.readOnly ? (drive.waking ? "Waking up" : drive.knocked == nil ? "Allow this phone" : "Press green") : "Connected"
         }
     }
 
@@ -97,7 +97,7 @@ struct DrivePanel: View {
         case .unpicked: return drive.wrongPick.map { "You picked \"\($0)\". Tap Browse, then WEDGIE, then Open." }
             ?? "Tap Find my wedgie. Then tap Browse, WEDGIE, Open. Only once."
         case .away: return drive.knocked != nil ? "Your wedgie is reconnecting." : "Plug it into this iPhone. It connects by itself."
-        case .here: return drive.readOnly ? (drive.waking ? "Your wedgie just plugged in. A few seconds." : drive.knocked == nil ? "Your wedgie asks first."
+        case .here: return drive.readOnly ? (drive.waking ? "Your wedgie just plugged in. A few seconds." : drive.knocked == nil ? "Your wedgie asks before this phone can send it transactions."
                 : "Your wedgie is asking. Press its green button.")
             : "Your wedgie is plugged in."
         }
@@ -144,7 +144,7 @@ struct DriveDetails: View {
         switch drive.state {
         case .unpicked: return "No drive picked yet"
         case .away: return "Not plugged in"
-        case .here: return (drive.readOnly ? "Plugged in, not let in" : "Connected") + (drive.name.isEmpty ? "" : " (\(drive.name))")
+        case .here: return (drive.readOnly ? "Plugged in, not allowed yet" : "Connected") + (drive.name.isEmpty ? "" : " (\(drive.name))")
         }
     }
 }
@@ -247,7 +247,7 @@ struct PickerHint: View {
     }
 }
 
-/// After "Let this phone in": a green bar that keeps creeping (slower near the end) until it's connected.
+/// After "Allow phone to send txns": a green bar that keeps creeping (slower near the end) until it's connected.
 struct WaitBar: View {
     @State private var start = Date()
     var body: some View {

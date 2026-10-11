@@ -122,14 +122,8 @@ final class DriveIO: @unchecked Sendable {
             d.set(n, forKey: "wedgieReqN")
             let name = "REQ-\(n).TXT"
             let file = root.appendingPathComponent(name)
-            guard fm.createFile(atPath: file.path, contents: nil) else { throw DriveError.full }
-            let h = try FileHandle(forWritingTo: file)
-            do {
-                try h.write(contentsOf: Data((line + "\n").utf8))
-                try h.synchronize()
-                try h.close()
-            } catch {
-                try? h.close()
+            do { try Data((line + "\n").utf8).write(to: file) }
+            catch {
                 try? fm.removeItem(at: file)            // a half-written one would hold the wedgie's RAM
                 Self.flush(root)
                 throw error
@@ -139,7 +133,8 @@ final class DriveIO: @unchecked Sendable {
         }
     }
 
-    /// Push what iOS still holds for the drive (deletes, folder and FAT changes) out to the wedgie now.
+    /// Push what iOS still holds for the drive (deletes, folder and FAT changes) out to the wedgie now. Best effort:
+    /// the drive's file system may not do fsync (a FileHandle.synchronize there failed every send, 10-10).
     private static func flush(_ root: URL) {
         let fd = open(root.path, O_RDONLY)
         if fd >= 0 {
@@ -159,14 +154,13 @@ private final class Once: @unchecked Sendable {
 }
 
 enum DriveError: LocalizedError {
-    case notPicked, noAccess, away, notWedgie, full
+    case notPicked, noAccess, away, notWedgie
     var errorDescription: String? {
         switch self {
         case .notPicked: return "pick the WEDGIE drive first"
         case .noAccess: return "iOS said no to the drive: pick it again"
         case .away: return "plug in your wedgie"
         case .notWedgie: return "that folder isn't the WEDGIE drive"
-        case .full: return "the wedgie took no more (its drive is full for now)"
         }
     }
 }
