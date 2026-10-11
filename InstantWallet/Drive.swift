@@ -144,6 +144,7 @@ final class DriveIO: @unchecked Sendable {
     /// names the drive's current mount (bookmarks don't resolve across volume mounts, Apple bug r.102995804; the
     /// drive remounts after every knock). Only touched on `q`.
     private var held: URL?
+    private var sentAt: [String: Date] = [:]  // REQ files written this run, and when (sendNow); only touched on `q`
     private var heldFrom: Data?             // the bookmark `held` came from: a different one saved = picked again
     private func drop() { held?.stopAccessingSecurityScopedResource(); held = nil; heldFrom = nil }
     /// Forgotten: let go of the scope. Straight onto the queue, never turned away (it runs once the queue is free).
@@ -209,13 +210,18 @@ final class DriveIO: @unchecked Sendable {
             for u in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
                 let n = u.lastPathComponent.uppercased()
                 guard n.hasPrefix("REQ-") || n.hasPrefix("._REQ-") else { continue }
-                if (try? fm.removeItem(at: u)) != nil { gone += 1 }
+                // not one written in the last 2 s: the wedgie reads a file 0.7 s after the last write, and two
+                // senders a moment apart (the page and the soak, 10-11) wiped each other's request
+                let mine = n.hasPrefix("._") ? String(n.dropFirst(2)) : n
+                if let at = sentAt[mine], Date().timeIntervalSince(at) < 2 { continue }
+                if (try? fm.removeItem(at: u)) != nil { gone += 1; sentAt[mine] = nil }
             }
             if gone > 0 { Self.flush(root) }
             let d = UserDefaults.standard
             let n = d.integer(forKey: "wedgieReqN") % 9999 + 1
             d.set(n, forKey: "wedgieReqN")
             let name = "REQ-\(n).TXT"
+            sentAt[name] = Date()
             let file = root.appendingPathComponent(name)
             do { try Data((line + "\n").utf8).write(to: file) }
             catch {
