@@ -29,3 +29,9 @@ Associated Domains Development, then delete and reinstall the app. TestFlight/Ap
 A wedgie plugs into the iPhone over USB-C as a drive (WEDGIE). `Drive.swift` reads and writes it,
 `DrivePanel.swift` is the screen (pick the drive once, let this phone in), and `window.wedgieDrive` gives the
 site access (`WebView.swift`). The why and the gotchas: instant-wallet `docs/WEDGIE-PHONE.md`.
+
+## NFC
+
+`window.wedgieNfc.write(url)` writes a claim link to an NFC card (`Nfc.swift`); the site's Settings → Share to a card
+uses it. Needs the NFC Tag Reading capability on `io.instantwallet` in the Apple developer portal, or signing fails.
+Never locks a tag.

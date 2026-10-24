@@ -13,6 +13,9 @@
 //        read(name)    -> the file's text, or null
 //        panel(mode)   -> opens the wedgie panel; "connect": close it once the drive is writable
 //        log(text)     -> a line in the app's log (Documents/log.txt), "page: ..."
+//   6. NFC: `window.wedgieNfc` (only on the site) writes a claim link to a card (Nfc.swift).
+//        available()   -> true if this phone can write NFC
+//        write(url)    -> "ok" once written (an instantwallet.io link only), rejects with the error
 import SwiftUI
 import WebKit
 
@@ -26,6 +29,11 @@ private let bridgeJS = """
     read: (name) => call("read", name),
     panel: (mode) => call("panel", mode || ""),
     log: (text) => call("log", String(text).slice(0, 2000)),
+  };
+  const nfc = (op, arg) => window.webkit.messageHandlers.wedgieNfc.postMessage({ op, arg });
+  window.wedgieNfc = {
+    available: () => nfc("available"),
+    write: (url) => nfc("write", String(url)),
   };
 })();
 """
@@ -49,6 +57,7 @@ struct WebView: UIViewRepresentable {
         cfg.userContentController.add(context.coordinator, name: "ready")   // the site: balance is on screen
         cfg.userContentController.addUserScript(WKUserScript(source: bridgeJS, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         cfg.userContentController.addScriptMessageHandler(DriveBridge(), contentWorld: .page, name: "wedgieDrive")
+        cfg.userContentController.addScriptMessageHandler(NfcBridge(), contentWorld: .page, name: "wedgieNfc")
 
         let wv = WKWebView(frame: .zero, configuration: cfg)
         wv.uiDelegate = context.coordinator

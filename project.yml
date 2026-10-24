@@ -30,6 +30,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: { UIImageName: MarkFaded, UIColorName: Background }   # the logo at 30%, where Splash starts
         NSCameraUsageDescription: Instant Wallet uses the camera to scan QR codes.
+        NFCReaderUsageDescription: Instant Wallet writes claim links to NFC cards.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresFullScreen: true          # portrait only; App Store upload refuses that without it
         ITSAppUsesNonExemptEncryption: false
