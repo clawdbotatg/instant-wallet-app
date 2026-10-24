@@ -38,11 +38,12 @@ private let bridgeJS = """
 })();
 """
 
-// Only a ceiling for a balance that never comes (API down, bad signal): the
-// wallet stays reachable. Never a minimum — ready shows the wallet at once.
-let WAIT_MAX: TimeInterval = 5
+// Only a ceiling for a slow balance: after it the wallet shows with a loading bar
+// where the balance goes (the site shows last open's balance at once, so this is
+// mostly a first open). Never a minimum — ready shows the wallet at once.
+let WAIT_MAX: TimeInterval = 1.5
 // The hard ceiling: whatever is slow or stuck, the wallet shows this long after launch.
-let LOAD_MAX: TimeInterval = 8
+let LOAD_MAX: TimeInterval = 3
 
 struct WebView: UIViewRepresentable {
     @ObservedObject var nav: Nav
