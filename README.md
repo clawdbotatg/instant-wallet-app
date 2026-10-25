@@ -35,3 +35,7 @@ site access (`WebView.swift`). The why and the gotchas: instant-wallet `docs/WED
 `window.wedgieNfc.write(url)` writes a claim link to an NFC card (`Nfc.swift`); the site's Settings → Share to a card
 uses it. Needs the NFC Tag Reading capability on `io.instantwallet` in the Apple developer portal, or signing fails.
 Never locks a tag.
+
+## Pull to refresh
+
+Pulling down sends the page an `instantwallet:refresh` event. The site reloads the balance and shows a spinner beside it.

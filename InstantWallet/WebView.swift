@@ -16,6 +16,8 @@
 //   6. NFC: `window.wedgieNfc` (only on the site) writes a claim link to a card (Nfc.swift).
 //        available()   -> true if this phone can write NFC
 //        write(url)    -> "ok" once written (an instantwallet.io link only), rejects with the error
+//   7. pull down on the wallet: the page gets an `instantwallet:refresh` event and reloads
+//      the balance with its own spinner beside it (the native one only flashes).
 import SwiftUI
 import WebKit
 
@@ -68,6 +70,11 @@ struct WebView: UIViewRepresentable {
         wv.scrollView.contentInsetAdjustmentBehavior = .never   // the page reads env(safe-area-inset-*) itself
         wv.allowsBackForwardNavigationGestures = true
         wv.allowsLinkPreview = false
+        wv.scrollView.alwaysBounceVertical = true               // the wallet fits the screen; pull needs a bounce
+        let pull = UIRefreshControl()
+        pull.addTarget(context.coordinator, action: #selector(Coordinator.pulled(_:)), for: .valueChanged)
+        wv.scrollView.refreshControl = pull
+        context.coordinator.page = wv
         context.coordinator.loaded = nav.url
         wv.load(URLRequest(url: nav.url))
         DispatchQueue.main.asyncAfter(deadline: .now() + LOAD_MAX) { [nav] in
@@ -89,10 +96,18 @@ struct WebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
         var loaded: URL?
         var retries = 0
+        weak var page: WKWebView?
         let nav: Nav
         init(nav: Nav) { self.nav = nav }
 
         private func mine(_ host: String?) -> Bool { host?.lowercased() == SITE.host }
+
+        @objc func pulled(_ pull: UIRefreshControl) {
+            pull.endRefreshing()
+            guard let wv = page, mine(wv.url?.host) else { return }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            wv.evaluateJavaScript("window.dispatchEvent(new Event('instantwallet:refresh'))")
+        }
 
         func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                      initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
